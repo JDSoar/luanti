@@ -150,10 +150,16 @@ void Server::handleCommand_Init(NetworkPacket* pkt)
 		return;
 	}
 
-	// Do not allow multiple players in simple singleplayer mode
-	if (isSingleplayer() && !m_clients.getClientIDs(CS_HelloSent).empty()) {
+	// In simple singleplayer mode the server normally only accepts one client.
+	// For couch / split-screen mode we lift this cap up to the configured
+	// number of local seats (set by Game::createServer when split-screen is
+	// enabled) so the extra in-process clients can also join.
+	if (isSingleplayer() &&
+			m_clients.getClientIDs(CS_HelloSent).size() >=
+				getSimpleSingleplayerMaxSeats()) {
 		infostream << "Server: Not allowing another client (" << addr_s <<
-			") to connect in simple singleplayer mode" << std::endl;
+			") to connect in simple singleplayer mode (cap=" <<
+			getSimpleSingleplayerMaxSeats() << ")" << std::endl;
 		DenyAccess(peer_id, SERVER_ACCESSDENIED_SINGLEPLAYER);
 		return;
 	}

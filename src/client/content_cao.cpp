@@ -466,8 +466,9 @@ void GenericCAO::setAttachment(object_t parent_id, const std::string &bone,
 		m_is_visible = true;
 	} else if (!m_is_local_player) {
 		// Objects attached to the local player should be hidden in first person
-		m_is_visible = !m_attached_to_local ||
-			m_client->getCamera()->getCameraMode() != CAMERA_MODE_FIRST;
+		Camera *cam = m_client->getCamera();
+		m_is_visible = !m_attached_to_local || !cam ||
+			cam->getCameraMode() != CAMERA_MODE_FIRST;
 		m_force_visible = false;
 	} else {
 		// Local players need to have this set,
@@ -565,9 +566,12 @@ void GenericCAO::removeFromScene(bool permanent)
 		m_client->getMinimap()->removeMarker(&m_marker);
 }
 
-void GenericCAO::addToScene(ITextureSource *tsrc, scene::ISceneManager *smgr)
+void GenericCAO::addToScene(ITextureSource *tsrc, scene::ISceneManager *smgr,
+		scene::ISceneNode *parent)
 {
 	m_smgr = smgr;
+	if (!parent)
+		parent = m_smgr->getRootSceneNode();
 
 	if (getSceneNode() != NULL) {
 		return;
@@ -605,7 +609,7 @@ void GenericCAO::addToScene(ITextureSource *tsrc, scene::ISceneManager *smgr)
 		}
 	};
 
-	m_matrixnode = m_smgr->addDummyTransformationSceneNode();
+	m_matrixnode = m_smgr->addDummyTransformationSceneNode(parent);
 	m_matrixnode->grab();
 
 	auto setMaterial = [this](video::SMaterial &mat) {
@@ -1063,7 +1067,7 @@ void GenericCAO::step(float dtime, ClientEnvironment *env)
 		}
 
 		removeFromScene(false);
-		addToScene(m_client->tsrc(), m_smgr);
+		addToScene(m_client->tsrc(), m_smgr, m_client->getSceneRoot());
 
 		// Attachments, part 2: Now that the parent has been refreshed, put its attachments back
 		for (u16 cao_id : m_attachment_child_ids) {
@@ -1817,7 +1821,16 @@ void GenericCAO::updateMeshCulling()
 	if (!m_is_local_player)
 		return;
 
-	const bool hidden = m_client->getCamera()->getCameraMode() == CAMERA_MODE_FIRST;
+	// Split-screen: the local player CAO can be added to the scene during
+	// the seat's connection handshake, before Game has had a chance to
+	// create the seat's Camera and call Client::setCamera(). Bail safely
+	// in that case; Game will re-run mesh culling after the camera is set
+	// (see Game::connectToServer / Game::initializeSeats).
+	Camera *cam = m_client->getCamera();
+	if (!cam)
+		return;
+
+	const bool hidden = cam->getCameraMode() == CAMERA_MODE_FIRST;
 
 	scene::ISceneNode *node = getSceneNode();
 

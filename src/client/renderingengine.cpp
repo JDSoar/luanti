@@ -251,8 +251,20 @@ void RenderingEngine::settingChangedCallback(const std::string &name, void *data
 
 v2u32 RenderingEngine::_getWindowSize() const
 {
-	if (core)
-		return core->getVirtualSize();
+	if (core) {
+		// RenderingCore::virtual_size is only refreshed inside
+		// RenderingCore::draw(). The split-screen renderer in
+		// Game::updateFrame() runs its own pipeline and never calls
+		// core->draw(), so virtual_size stays (0, 0). Returning that
+		// makes any caller doing ratio = something / window.X divide
+		// by zero - drawHotbar() in particular then takes its
+		// "doesn't fit, split into two rows" branch and the hotbar
+		// renders as two stacked rows in every seat. Fall back to the
+		// real backbuffer size when virtual_size hasn't been primed.
+		v2u32 vs = core->getVirtualSize();
+		if (vs.X > 0 && vs.Y > 0)
+			return vs;
+	}
 	return m_device->getVideoDriver()->getScreenSize();
 }
 
@@ -396,17 +408,29 @@ void RenderingEngine::initialize(Client *client, Hud *hud)
 {
 	const std::string &draw_mode = g_settings->get("3d_mode");
 	core.reset(createRenderingCore(draw_mode, m_device, client, hud));
+	m_default_client = client;
+	m_default_hud = hud;
 }
 
 void RenderingEngine::finalize()
 {
 	core.reset();
+	m_default_client = nullptr;
+	m_default_hud = nullptr;
 }
 
 void RenderingEngine::draw_scene(video::SColor skycolor, bool show_hud,
 		bool draw_wield_tool, bool draw_crosshair)
 {
-	core->draw(skycolor, show_hud, draw_wield_tool, draw_crosshair);
+	// Backwards compatible single-seat draw. Multi-seat callers should
+	// call draw_scene_for() with the seat's client/hud.
+	core->draw(m_default_client, m_default_hud, skycolor, show_hud, draw_wield_tool, draw_crosshair);
+}
+
+void RenderingEngine::draw_scene_for(Client *client, Hud *hud, video::SColor skycolor,
+		bool show_hud, bool draw_wield_tool, bool draw_crosshair)
+{
+	core->draw(client, hud, skycolor, show_hud, draw_wield_tool, draw_crosshair);
 }
 
 const VideoDriverInfo &RenderingEngine::getVideoDriverInfo(video::E_DRIVER_TYPE type)

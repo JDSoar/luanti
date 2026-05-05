@@ -8,6 +8,7 @@
 #include "irr_v2d.h"
 #include "joystick_controller.h"
 #include <array>
+#include <algorithm>
 #include <set>
 #include <unordered_map>
 #include "keycode.h"
@@ -83,7 +84,15 @@ public:
 		keyWasReleased.reset();
 	}
 
+	// Legacy single-joystick pointer (still supported).
 	JoystickController *joystick = nullptr;
+	// Optional multi-joystick dispatch (for split-screen).
+	void registerJoystick(JoystickController *j) { if (j) m_joysticks.push_back(j); }
+	void unregisterJoystick(JoystickController *j)
+	{
+		m_joysticks.erase(std::remove(m_joysticks.begin(), m_joysticks.end(), j),
+				m_joysticks.end());
+	}
 
 	PointerType getLastPointerType() { return last_pointer_type; }
 
@@ -132,6 +141,8 @@ private:
 	bool esc_down = false;
 
 	PointerType last_pointer_type = PointerType::Mouse;
+
+	std::vector<JoystickController *> m_joysticks;
 };
 
 class InputHandler
@@ -193,11 +204,13 @@ public:
 	RealInputHandler(MyEventReceiver *receiver) : m_receiver(receiver)
 	{
 		m_receiver->joystick = &joystick;
+		m_receiver->registerJoystick(&joystick);
 		m_receiver->reloadKeybindings();
 	}
 
 	virtual ~RealInputHandler()
 	{
+		m_receiver->unregisterJoystick(&joystick);
 		m_receiver->joystick = nullptr;
 	}
 
@@ -249,6 +262,8 @@ public:
 		return m_receiver->getMouseWheel();
 	}
 
+	MyEventReceiver *getReceiver() const { return m_receiver; }
+
 	void clear()
 	{
 		joystick.clear();
@@ -264,6 +279,42 @@ public:
 private:
 	MyEventReceiver *m_receiver = nullptr;
 	v2s32 m_mousepos;
+};
+
+// Joystick-only handler used for extra split-screen seats.
+class GamepadInputHandler final : public InputHandler
+{
+public:
+	GamepadInputHandler(MyEventReceiver *receiver, u8 joystick_id) : m_receiver(receiver)
+	{
+		joystick.setJoystickId(joystick_id);
+		m_receiver->registerJoystick(&joystick);
+	}
+
+	~GamepadInputHandler()
+	{
+		m_receiver->unregisterJoystick(&joystick);
+	}
+
+	bool isKeyDown(GameKeyType k) override { return joystick.isKeyDown(k); }
+	bool wasKeyDown(GameKeyType k) override { return joystick.wasKeyDown(k); }
+	bool wasKeyPressed(GameKeyType k) override { return joystick.wasKeyPressed(k); }
+	bool wasKeyReleased(GameKeyType k) override { return joystick.wasKeyReleased(k); }
+
+	bool cancelPressed() override { return false; }
+
+	float getJoystickSpeed() override { return joystick.getMovementSpeed(); }
+	float getJoystickDirection() override { return joystick.getMovementDirection(); }
+
+	v2s32 getMousePos() override { return v2s32(0, 0); }
+	void setMousePos(s32, s32) override {}
+	s32 getMouseWheel() override { return 0; }
+
+	void clear() override { joystick.clear(); }
+	void releaseAllKeys() override { joystick.releaseAllKeys(); }
+
+private:
+	MyEventReceiver *m_receiver = nullptr;
 };
 
 class RandomInputHandler final : public InputHandler

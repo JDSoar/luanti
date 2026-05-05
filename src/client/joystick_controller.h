@@ -147,6 +147,11 @@ public:
 		return m_joystick_id;
 	}
 
+	void setJoystickId(u8 id)
+	{
+		m_joystick_id = id;
+	}
+
 	f32 doubling_dtime;
 
 private:

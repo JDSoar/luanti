@@ -283,6 +283,12 @@ void set_default_settings()
 	settings->setDefault("cloud_radius", "12");
 	settings->setDefault("menu_clouds", "true");
 	settings->setDefault("menu_theme", "light");
+	settings->setDefault("splitscreen.enable", "false");
+	settings->setDefault("splitscreen.seats", "1");
+	settings->setDefault("splitscreen.layout", "");
+	settings->setDefault("splitscreen.name1", "");
+	settings->setDefault("splitscreen.name2", "");
+	settings->setDefault("splitscreen.name3", "");
 	settings->setDefault("translucent_liquids", "true");
 	settings->setDefault("console_height", "0.6");
 	settings->setDefault("console_color", "(0,0,0)");

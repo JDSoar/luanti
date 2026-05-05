@@ -205,6 +205,24 @@ local function get_formspec(tabview, name, tabdata)
 		end
 	end
 
+	-- Split-screen row: keep it tightly inside the LEFT column under the game
+	-- checkboxes. Use a small dropdown beside the checkbox so the seat number
+	-- stays in column 1 (~0..3.85) and never reaches the world list at x>=5.0.
+	local split_ss = ""
+	if world then
+		local sy = y
+		split_ss =
+			"checkbox[0," .. sy .. ";cb_local_splitscreen;" ..
+				fgettext("Split-screen") .. ";" ..
+				(core.settings:get_bool("splitscreen.enable") and "true" or "false") .. "]" ..
+			"dropdown[2.4," .. (sy - 0.18) .. ";1.45,0.72;dd_local_splitscreen_seats;1,2,3,4;" ..
+				tostring(core.settings:get("splitscreen.seats") or "1") .. "]" ..
+			"tooltip[dd_local_splitscreen_seats;" .. fgettext("Local players") .. "]"
+		y = y + yo
+	end
+
+	-- Original ordering: bottom buttons -> left column -> world list.
+	-- This was the working layout; only the split_ss row is added in the left column.
 	retval = retval .. "container[5.25,4.875]"
 	if world then
 		retval = retval ..
@@ -218,6 +236,7 @@ local function get_formspec(tabview, name, tabdata)
 			creative ..
 			damage ..
 			host ..
+			split_ss ..
 			"container_end[]" ..
 			"container[5.25,0.375]" ..
 			"label[0,0.2;".. fgettext("Select World:") .. "]"..
@@ -339,6 +358,25 @@ local function main_button_handler(this, fields, name, tabdata)
 		return true
 	end
 
+	if fields.cb_local_splitscreen then
+		core.settings:set_bool(
+			"splitscreen.enable", fields.cb_local_splitscreen == "true")
+		return true
+	end
+
+	-- The dropdown widget sends its current value on EVERY form submission
+	-- (clicking Play, Delete, etc., would otherwise be swallowed here).
+	-- Only consume the event when the value actually changed.
+	if fields["dd_local_splitscreen_seats"] then
+		local seats = tonumber(fields["dd_local_splitscreen_seats"]) or 1
+		seats = math.max(1, math.min(4, seats))
+		local old_seats = tonumber(core.settings:get("splitscreen.seats")) or 1
+		if seats ~= old_seats then
+			core.settings:set("splitscreen.seats", tostring(seats))
+			return true
+		end
+	end
+
 	if fields["cb_server_announce"] then
 		core.settings:set("server_announce", fields["cb_server_announce"])
 		local selected = core.get_textlist_index("srv_worlds")
@@ -366,7 +404,9 @@ local function main_button_handler(this, fields, name, tabdata)
 		local game_obj
 		if world then
 			game_obj = pkgmgr.find_by_gameid(world.gameid)
-			core.settings:set("menu_last_game", game_obj.id)
+			if game_obj then
+				core.settings:set("menu_last_game", game_obj.id)
+			end
 		end
 
 		local disabled_settings = get_disabled_settings(game_obj)
@@ -392,6 +432,27 @@ local function main_button_handler(this, fields, name, tabdata)
 			end
 		else
 			gamedata.singleplayer = true
+		end
+
+		-- Local couch split-screen: best-effort. If anything in this branch
+		-- errors we still want Play to start the world normally, never
+		-- silently swallow the click.
+		if not core.settings:get_bool("enable_server") then
+			local ss_enable = core.settings:get_bool("splitscreen.enable")
+			local ss_seats = tonumber(core.settings:get("splitscreen.seats") or "1") or 1
+			if ss_enable and ss_seats >= 2 and create_splitscreen_local_login_dialog then
+				local ok, dlg = pcall(create_splitscreen_local_login_dialog)
+				if ok and dlg then
+					local maintab = ui.find_by_name("maintab") or this
+					dlg:set_parent(maintab)
+					maintab:hide()
+					dlg:show()
+					return true
+				else
+					core.log("error",
+						"splitscreen dialog failed: " .. tostring(dlg))
+				end
+			end
 		end
 
 		core.start()

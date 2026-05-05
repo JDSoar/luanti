@@ -135,6 +135,27 @@ int ModApiMainMenu::l_start(lua_State *L)
 		data->address  = trim(getTextData(L, "address"));
 		data->port     = trim(getTextData(L, "port"));
 
+		// Optional split-screen runtime fields (may be absent from gamedata).
+		{
+			bool v = false;
+			bool enable = getBoolData(L, "splitscreen_enable", v);
+			if (v)
+				data->splitscreen_enable = enable;
+		}
+		{
+			bool v = false;
+			int seats = getIntegerData(L, "splitscreen_seats", v);
+			if (v)
+				data->splitscreen_seats = seats;
+		}
+		data->splitscreen_layout = getTextData(L, "splitscreen_layout");
+		data->splitscreen_names[0] = data->name;
+		data->splitscreen_passwords[0] = data->password;
+		for (int i = 1; i < 4; i++) {
+			data->splitscreen_names[i] = trim(getTextData(L, std::string("splitscreen_name") + itos(i)));
+			data->splitscreen_passwords[i] = getTextData(L, std::string("splitscreen_password") + itos(i));
+		}
+
 		const auto val = getTextData(L, "allow_login_or_register");
 		if (val == "login")
 			data->allow_login_or_register = ELoginRegister::Login;

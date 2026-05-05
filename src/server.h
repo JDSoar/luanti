@@ -351,6 +351,14 @@ public:
 	inline bool isSingleplayer() const
 			{ return m_simple_singleplayer_mode; }
 
+	// Max number of clients allowed when running in simple-singleplayer mode.
+	// 1 = classic behaviour. Increase this when starting a couch / split-screen
+	// game so that the extra in-process clients can also connect.
+	void setSimpleSingleplayerMaxSeats(u16 seats)
+			{ m_simple_singleplayer_max_seats = std::max<u16>(1, seats); }
+	u16 getSimpleSingleplayerMaxSeats() const
+			{ return m_simple_singleplayer_max_seats; }
+
 	struct StepSettings {
 		float steplen;
 		bool pause;
@@ -673,6 +681,9 @@ private:
 	// If true, do not allow multiple players and hide some multiplayer
 	// functionality
 	bool m_simple_singleplayer_mode;
+	// In simple-singleplayer mode, only this many clients may connect (default 1).
+	// Couch / split-screen elevates this so additional in-process seats can join.
+	u16 m_simple_singleplayer_max_seats = 1;
 	u16 m_max_chatmessage_length;
 	// For "dedicated" server list flag
 	bool m_dedicated;

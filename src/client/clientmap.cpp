@@ -160,11 +160,21 @@ ClientMap::ClientMap(
 		Client *client,
 		RenderingEngine *rendering_engine,
 		MapDrawControl &control,
-		s32 id
+		s32 id,
+		scene::ISceneManager *scene_manager,
+		scene::ISceneNode *parent
 ):
 	Map(client),
-	scene::ISceneNode(rendering_engine->get_scene_manager()->getRootSceneNode(),
-		rendering_engine->get_scene_manager(), id),
+	scene::ISceneNode(
+		// Use the per-seat scene manager + its root if supplied, otherwise
+		// fall back to the engine's main scene manager. Split-screen seats
+		// >= 1 always supply their own; seat 0 / regular play passes
+		// nullptr and gets the global one.
+		parent ? parent
+			: (scene_manager ? scene_manager
+				: rendering_engine->get_scene_manager())->getRootSceneNode(),
+		scene_manager ? scene_manager : rendering_engine->get_scene_manager(),
+		id),
 	m_client(client),
 	m_rendering_engine(rendering_engine),
 	m_control(control),

@@ -3512,7 +3512,13 @@ void GUIFormSpecMenu::drawMenu()
 		Draw background color
 	*/
 	v2u32 screenSize = driver->getScreenSize();
-	core::rect<s32> allbg(0, 0, screenSize.X, screenSize.Y);
+	// Split-screen: the "fullscreen" dim background must stop at the
+	// menu's viewport, otherwise opening seat 0's inventory paints the
+	// dim quad over every other player's panel too.
+	const core::rect<s32> &vp = getViewport();
+	core::rect<s32> allbg = (vp.getWidth() > 0 && vp.getHeight() > 0)
+		? vp
+		: core::rect<s32>(0, 0, screenSize.X, screenSize.Y);
 
 	if (m_bgfullscreen)
 		driver->draw2DRectangle(m_fullscreen_bgcolor, allbg, &allbg);
@@ -3684,13 +3690,28 @@ void GUIFormSpecMenu::showTooltip(const std::wstring &text,
 	s32 tooltip_height = m_tooltip_element->getTextHeight() + 5;
 
 	v2u32 screenSize = Environment->getVideoDriver()->getScreenSize();
+	// Split-screen: clamp the tooltip to this menu's viewport rect
+	// instead of the full window. Without this, hovering an item slot
+	// near the right edge of seat 1's panel would let the tooltip slide
+	// into seat 2's panel - and the "alt" clamps below would happily
+	// shove it deeper into the neighbour. We mirror the corner the
+	// tooltip would have been clamped to in single-screen mode but
+	// using the viewport's max_x / max_y / min_x / min_y.
+	const core::rect<s32> &vp = getViewport();
+	const bool has_viewport = vp.getWidth() > 0 && vp.getHeight() > 0;
+	const s32 vp_min_x = has_viewport ? vp.UpperLeftCorner.X : 0;
+	const s32 vp_min_y = has_viewport ? vp.UpperLeftCorner.Y : 0;
+	const s32 vp_max_x = has_viewport ? vp.LowerRightCorner.X : (s32)screenSize.X;
+	const s32 vp_max_y = has_viewport ? vp.LowerRightCorner.Y : (s32)screenSize.Y;
+
 	int tooltip_offset_x = m_btn_height;
 	int tooltip_offset_y = m_btn_height;
 
 	if (RenderingEngine::getLastPointerType() == PointerType::Touch) {
 		tooltip_offset_x *= 3;
 		tooltip_offset_y  = 0;
-		if (m_pointer.X > (s32)screenSize.X / 2)
+		const s32 vp_mid_x = vp_min_x + (vp_max_x - vp_min_x) / 2;
+		if (m_pointer.X > vp_mid_x)
 			tooltip_offset_x = -(tooltip_offset_x + tooltip_width);
 	}
 
@@ -3698,8 +3719,8 @@ void GUIFormSpecMenu::showTooltip(const std::wstring &text,
 	s32 tooltip_x = m_pointer.X + tooltip_offset_x;
 	s32 tooltip_y = m_pointer.Y + tooltip_offset_y;
 	// Bottom/Left limited positions (if the tooltip is too far out)
-	s32 tooltip_x_alt = (s32)screenSize.X - tooltip_width  - m_btn_height;
-	s32 tooltip_y_alt = (s32)screenSize.Y - tooltip_height - m_btn_height;
+	s32 tooltip_x_alt = vp_max_x - tooltip_width  - m_btn_height;
+	s32 tooltip_y_alt = vp_max_y - tooltip_height - m_btn_height;
 
 	int collision = (tooltip_x_alt < tooltip_x) + 2 * (tooltip_y_alt < tooltip_y);
 	switch (collision) {
@@ -3711,11 +3732,19 @@ void GUIFormSpecMenu::showTooltip(const std::wstring &text,
 		break;
 	case 3: // both
 		tooltip_x = tooltip_x_alt;
-		tooltip_y = (s32)screenSize.Y - 2 * tooltip_height - m_btn_height;
+		tooltip_y = vp_max_y - 2 * tooltip_height - m_btn_height;
 		break;
 	default: // OK
 		break;
 	}
+
+	// Final clamp into the viewport: prevents the tooltip from spilling
+	// off the left/top edge of this seat's panel even after the alt
+	// corrections above.
+	if (tooltip_x < vp_min_x)
+		tooltip_x = vp_min_x;
+	if (tooltip_y < vp_min_y)
+		tooltip_y = vp_min_y;
 
 	m_tooltip_element->setRelativePosition(
 		core::rect<s32>(

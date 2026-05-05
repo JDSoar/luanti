@@ -139,6 +139,11 @@ local function get_formspec(tabview, name, tabdata)
 		"label[2.875,0;" .. fgettext("Password") .. "]" ..
 		"field[0.25,0.2;2.625,0.75;te_name;;" .. core.formspec_escape(core.settings:get("name")) .. "]" ..
 		"pwdfield[2.875,0.2;2.625,0.75;te_pwd;]" ..
+		"checkbox[0.25,1.05;cb_splitscreen;" .. fgettext("Split-screen") .. ";" ..
+			(core.settings:get_bool("splitscreen.enable") and "true" or "false") .. "]" ..
+		"dropdown[2.875,1.0;2.625,0.75;dd_splitscreen_seats;1,2,3,4;" ..
+			tostring(core.settings:get("splitscreen.seats") or "1") .. "]" ..
+		"tooltip[dd_splitscreen_seats;" .. fgettext("Local players") .. "]" ..
 		"container_end[]"
 
 	-- Connect
@@ -503,6 +508,21 @@ local function main_button_handler(tabview, fields, name, tabdata)
 		core.settings:set("name", fields.te_name)
 	end
 
+	if fields.cb_splitscreen then
+		core.settings:set_bool("splitscreen.enable", fields.cb_splitscreen == "true")
+	end
+
+	-- A dropdown sends its value on every form submission; only persist
+	-- when it actually changed.
+	if fields.dd_splitscreen_seats then
+		local seats = tonumber(fields.dd_splitscreen_seats) or 1
+		seats = math.max(1, math.min(4, seats))
+		local old_seats = tonumber(core.settings:get("splitscreen.seats")) or 1
+		if seats ~= old_seats then
+			core.settings:set("splitscreen.seats", tostring(seats))
+		end
+	end
+
 	if fields.servers then
 		local event = core.explode_table_event(fields.servers)
 		local server = tabdata.lookup[event.row]
@@ -637,7 +657,19 @@ local function main_button_handler(tabview, fields, name, tabdata)
 		core.settings:set("address",     gamedata.address)
 		core.settings:set("remote_port", gamedata.port)
 
-		core.start()
+		local ss_enable = core.settings:get_bool("splitscreen.enable")
+		local ss_seats = tonumber(core.settings:get("splitscreen.seats") or "1") or 1
+		if ss_enable and ss_seats >= 2 then
+			local dlg = create_splitscreen_login_dialog(
+				gamedata.address, gamedata.port, fields.te_name, fields.te_pwd
+			)
+			dlg:set_parent(tabview)
+			tabview:hide()
+			dlg:show()
+		else
+			gamedata.splitscreen_enable = false
+			core.start()
+		end
 		return true
 	end
 

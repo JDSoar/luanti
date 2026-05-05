@@ -203,7 +203,15 @@ bool MyEventReceiver::OnEvent(const SEvent &event)
 		return true;
 	} else if (event.EventType == EET_JOYSTICK_INPUT_EVENT) {
 		// joystick may be nullptr if game is launched with '--random-input' parameter
-		return joystick && joystick->handleEvent(event.JoystickEvent);
+		bool handled = false;
+		for (auto *j : m_joysticks) {
+			if (j && j->handleEvent(event.JoystickEvent))
+				handled = true;
+		}
+		// Backwards compatibility: if nothing registered, fall back.
+		if (!handled && joystick)
+			handled = joystick->handleEvent(event.JoystickEvent);
+		return handled;
 	} else if (event.EventType == EET_MOUSE_INPUT_EVENT) {
 		// Handle mouse events
 		switch (event.MouseInput.Event) {

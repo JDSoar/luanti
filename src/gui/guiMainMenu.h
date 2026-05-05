@@ -5,6 +5,7 @@
 #pragma once
 
 #include "gameparams.h"
+#include <array>
 #include <string>
 
 struct MainMenuDataForScript {
@@ -39,6 +40,13 @@ struct MainMenuData {
 	MainMenuDataForScript script_data;
 
 	ELoginRegister allow_login_or_register = ELoginRegister::Any;
+
+	// Split-screen couch multiplayer (runtime data for GameStartData)
+	bool splitscreen_enable = false;
+	int splitscreen_seats = 1; // clamp 1..4; 1 == off
+	std::string splitscreen_layout; // empty = default/auto
+	std::array<std::string, 4> splitscreen_names{};
+	std::array<std::string, 4> splitscreen_passwords{}; // runtime only; do not persist
 
 	MainMenuData() = default;
 };

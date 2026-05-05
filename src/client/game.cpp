@@ -15,6 +15,8 @@
 #include "client/sound.h"
 #include "clientmap.h"
 #include "clientmedia.h" // For clientMediaUpdateCacheCopy
+#include "mapblock.h"    // For getNodeBlockPos (used by split-screen safe-spawn search)
+#include "servermap.h"   // For ServerMap::emergeBlock
 #include "config.h"
 #include "content_cao.h"
 #include "content/subgames.h"
@@ -37,6 +39,9 @@
 #include "profiler.h"
 #include "raycast.h"
 #include "server.h"
+#include "serverenvironment.h"
+#include "server/player_sao.h"
+#include "remoteplayer.h"
 #include "settings.h"
 #include "shader.h"
 #include "sound_maker.h"
@@ -464,6 +469,14 @@ bool Game::startup(volatile std::sig_atomic_t *kill,
 			start_data.socket_port, start_data.game_spec))
 		return false;
 
+	// Couch / split-screen: when we're running the embedded server in simple
+	// singleplayer mode but want >1 local seat, lift its hard "1 client max"
+	// cap so the additional in-process clients can actually join.
+	if (server && simple_singleplayer_mode && start_data.splitscreen_enable) {
+		server->setSimpleSingleplayerMaxSeats(
+			rangelim<u16>(start_data.splitscreen_seats, 1, 4));
+	}
+
 	if (!createClient(start_data))
 		return false;
 
@@ -580,7 +593,58 @@ void Game::run()
 					cam_damp_lambda
 			);
 		}
+		// Seat 0 uses the mouse/keyboard-driven cam_view from above. Keep
+		// SeatRuntime[0]'s copy in sync so any code that reads it later
+		// (HUD layout, debug overlay, etc.) sees the same orientation.
+		m_seats[0].cam_view = cam_view;
 		updatePlayerControl(cam_view);
+		// Split-screen: apply control for additional seats. Each extra seat
+		// gets its OWN cam_view, driven by its gamepad's right stick (the
+		// "frustum" axes), so seat 0's mouse never rotates seat 1's player
+		// or vice-versa.
+		if (m_splitscreen_seats > 1) {
+			InputHandler *saved_input = input;
+			Client *saved_client = client;
+			const f32 sens_scale = getSensitivityScaleFactor();
+			const f32 stick_rate =
+					m_cache_joystick_frustum_sensitivity * dtime * sens_scale;
+			const f32 key_rate =
+					m_cache_keyboard_camera_speed * dtime * sens_scale;
+			for (u8 i = 1; i < m_splitscreen_seats; i++) {
+				if (!m_seats[i].client || !m_seats[i].input)
+					continue;
+
+				CameraOrientation &sv = m_seats[i].cam_view;
+				InputHandler *seat_in = m_seats[i].input.get();
+
+				// Right-stick look (gamepad).
+				if (m_cache_enable_joysticks) {
+					sv.camera_yaw -=
+						seat_in->joystick.getAxisWithoutDead(
+							JA_FRUSTUM_HORIZONTAL) * stick_rate;
+					sv.camera_pitch +=
+						seat_in->joystick.getAxisWithoutDead(
+							JA_FRUSTUM_VERTICAL) * stick_rate;
+				}
+				// D-pad / keybind-mapped look (works even without an
+				// analog right stick).
+				if (seat_in->isKeyDown(KeyType::CAMERA_YAW_LEFT))
+					sv.camera_yaw += key_rate;
+				if (seat_in->isKeyDown(KeyType::CAMERA_YAW_RIGHT))
+					sv.camera_yaw -= key_rate;
+				if (seat_in->isKeyDown(KeyType::CAMERA_PITCH_UP))
+					sv.camera_pitch -= key_rate;
+				if (seat_in->isKeyDown(KeyType::CAMERA_PITCH_DOWN))
+					sv.camera_pitch += key_rate;
+				sv.camera_pitch = rangelim(sv.camera_pitch, -89, 89);
+
+				client = m_seats[i].client;
+				input = seat_in;
+				updatePlayerControl(sv);
+			}
+			client = saved_client;
+			input = saved_input;
+		}
 
 		updatePauseState();
 		if (m_is_paused)
@@ -644,9 +708,12 @@ void Game::shutdown()
 	chat_backend->addMessage(L"", L"# Disconnected.");
 	chat_backend->addMessage(L"", L"");
 
-	if (client) {
-		client->Stop();
-		while (!client->isShutdown()) {
+	// Stop all seats
+	for (u8 i = 0; i < m_splitscreen_seats; i++) {
+		if (!m_seats[i].client)
+			continue;
+		m_seats[i].client->Stop();
+		while (!m_seats[i].client->isShutdown()) {
 			assert(texture_src != NULL);
 			assert(shader_src != NULL);
 			texture_src->processQueue();
@@ -655,7 +722,24 @@ void Game::shutdown()
 		}
 	}
 
-	delete client;
+	for (u8 i = 0; i < m_splitscreen_seats; i++) {
+		delete m_seats[i].hud;
+		m_seats[i].hud = nullptr;
+		delete m_seats[i].camera;
+		m_seats[i].camera = nullptr;
+		delete m_seats[i].client;
+		m_seats[i].client = nullptr;
+		m_seats[i].scene_root = nullptr;
+		m_seats[i].input.reset();
+		if (m_seats[i].render_tex) {
+			driver->removeTexture(m_seats[i].render_tex);
+			m_seats[i].render_tex = nullptr;
+		}
+	}
+
+	client = nullptr;
+	camera = nullptr;
+	hud = nullptr;
 	client = nullptr;
 	soundmaker.reset();
 	sound_manager.reset();
@@ -928,6 +1012,188 @@ bool Game::createClient(const GameStartData &start_data)
 	if (mapper && client->modsLoaded())
 		client->getScript()->on_minimap_ready(mapper);
 
+	// Split-screen additional seats (MVP: sequential connect, no extra GUI).
+	m_splitscreen_seats = start_data.splitscreen_enable ?
+			rangelim<u8>(start_data.splitscreen_seats, 1, 4) : 1;
+	m_seats[0].client = client;
+	m_seats[0].camera = camera;
+	m_seats[0].hud = hud;
+	m_seats[0].scene_root = client->getSceneRoot();
+	m_seats[0].input.reset();
+
+	// Couch / online: spin up extra local clients whenever we have an embedded
+	// server (simple singleplayer, etc.) or a normal multiplayer destination.
+	if (m_splitscreen_seats >= 2 &&
+			(server || !start_data.isSinglePlayer())) {
+		auto *receiver = dynamic_cast<RealInputHandler *>(input) ?
+				static_cast<RealInputHandler *>(input)->getReceiver() : nullptr;
+
+		// Resolve address once for additional seats (mirrors Game::connectToServer).
+		Address connect_address(0, 0, 0, 0, start_data.socket_port);
+		Address fallback_address;
+		try {
+			connect_address.Resolve(start_data.address.c_str(), &fallback_address);
+			if (connect_address.isAny()) {
+				if (connect_address.isIPv6()) {
+					IPv6AddressBytes addr_bytes;
+					addr_bytes.bytes[15] = 1;
+					connect_address.setAddress(&addr_bytes);
+				} else {
+					connect_address.setAddress(127, 0, 0, 1);
+				}
+			}
+		} catch (...) {
+			// If seat0 connected, resolution already worked; keep going with any() addr.
+		}
+
+		for (u8 i = 1; i < m_splitscreen_seats; i++) {
+			std::string pname = start_data.splitscreen_names[i];
+			if (pname.empty())
+				pname = "Player" + itos(static_cast<s32>(i + 1));
+
+			// Per-seat scene manager. createNewSceneManager(false) shares
+			// the video driver and mesh cache with the engine's main
+			// scene manager but gives this seat a fully independent
+			// scene tree (its own root, its own active camera, its own
+			// CAOs). This is what makes split-screen "just work" - each
+			// seat draws its own world without seeing other seats'
+			// players, attachments, etc., so we don't need any visibility
+			// hacks. Client takes a reference (via grab()) and drops it
+			// in its destructor.
+			scene::ISceneManager *seat_smgr = smgr->createNewSceneManager(false);
+			m_seats[i].scene_root = seat_smgr->getRootSceneNode();
+
+			Client *c = nullptr;
+			try {
+				c = new Client(pname.c_str(),
+						start_data.splitscreen_passwords[i],
+						*draw_control, texture_src, shader_src,
+						itemdef_manager, nodedef_manager, sound_manager.get(), eventmgr,
+						m_rendering_engine,
+						m_item_visuals_manager.get(),
+						start_data.allow_login_or_register,
+						seat_smgr,
+						(s32)(666 + i));
+			} catch (const BaseException &e) {
+				// Best-effort: keep seat0 playable.
+				warningstream << "Split-screen: failed creating seat " << int(i)
+						<< " client: " << e.what() << std::endl;
+				seat_smgr->drop();
+				m_seats[i] = SeatRuntime{};
+				continue;
+			}
+
+			// Bind controller for this seat (MVP: joystick id = i-1).
+			if (receiver) {
+				auto seat_input = std::make_unique<GamepadInputHandler>(receiver, (u8)(i - 1));
+				m_seats[i].input = std::move(seat_input);
+			}
+
+			c->m_internal_server = !!server;
+			c->m_simple_singleplayer_mode = simple_singleplayer_mode;
+
+			// Mark this seat as a secondary that shares all content
+			// with the primary (seat 0). This MUST happen before
+			// connect() / step() runs for this seat, otherwise the
+			// TOCLIENT_NODEDEF / TOCLIENT_ITEMDEF / TOCLIENT_*MEDIA*
+			// handlers will mutate the primary's still-in-use shared
+			// NodeDefManager / IItemDefManager / TextureSource and
+			// crash the primary's mesh thread (use-after-free in
+			// MapblockMeshGenerator::drawSolidNode reading
+			// `f2.visuals`). See Client::setSharesContentWithPrimary.
+			//
+			// Passing the primary client also copies its per-Client
+			// m_mesh_data cache so getMesh("character.b3d") etc.
+			// resolves on this seat (m_mesh_data is per-Client, not
+			// shared like the TextureSource).
+			c->setSharesContentWithPrimary(client);
+
+			// Create + bind the seat's Camera *before* connecting, so the
+			// local player CAO that arrives during the handshake sees a
+			// valid Client::getCamera() and can hide its own mesh from
+			// this seat's first-person view. Doing this after connect()
+			// loses the race: addToScene() -> updateMeshCulling() runs
+			// while m_camera is still null, so the seat's own player
+			// model never gets culled and ends up filling the camera.
+			auto *cam = new Camera(*draw_control, c, m_rendering_engine);
+			c->setCamera(cam);
+			m_seats[i].camera = cam;
+
+			c->connect(connect_address, start_data.address);
+
+			// Register this seat's client immediately so Game::step() (and the
+			// inner loops here) actually advance it. Without this, the client
+			// never processes incoming packets and we hang forever on the
+			// seat 0 "Done!" loading screen because mediaReceived() etc. stay
+			// false.
+			m_seats[i].client = c;
+
+			// Temporarily make the global `client` pointer reference this seat
+			// so Game::getServerContent() / Game::checkConnection() inspect
+			// the right Client instance during the wait phases below.
+			Client *old_client = client;
+			client = c;
+
+			{
+				FpsControl fps_control;
+				f32 dtime;
+				fps_control.reset();
+				float wait_time = 0.f;
+				while (m_rendering_engine->run()) {
+					fps_control.limit(device, &dtime);
+					// Step *all* seats: keeps seat 0 alive while this seat
+					// progresses through the handshake.
+					step(dtime);
+					if (c->getState() == LC_Init)
+						break;
+					if (input->cancelPressed())
+						break;
+					wait_time += dtime;
+					if (!server && wait_time > GAME_CONNECTION_TIMEOUT)
+						break;
+				}
+			}
+
+			// Fetch server content for this seat (may no-op due to cache).
+			bool aborted = false;
+			(void)getServerContent(&aborted);
+
+			// IMPORTANT: pass false here. Additional seats share the
+			// primary's TextureSource / ShaderSource / NodeDefManager.
+			// Letting them rebuild those again would invalidate every
+			// texture pointer cached in the already-built MapBlockMesh
+			// materials of seats 0..i-1 and crash the renderer next
+			// frame. See Client::afterContentReceived() for details.
+			c->afterContentReceived(false);
+
+			// Restore the primary client pointer.
+			client = old_client;
+
+			auto *lp = c->getEnv().getLocalPlayer();
+			auto *h = new Hud(c, lp, &lp->inventory);
+
+			// Camera defaults to first-person (matches Camera's own
+			// default + seat 0). First-person also gives each seat the
+			// wielded item / arm overlay (only rendered in
+			// CAMERA_MODE_FIRST).
+
+			// Belt-and-suspenders: re-apply local-player mesh culling now
+			// that everything is wired up. addToScene() already does this
+			// during the handshake (see the early Camera setup above), but
+			// re-running here is cheap and protects against any ordering
+			// quirks that leave the seat's own player mesh visible.
+			if (lp) {
+				if (GenericCAO *pcao = lp->getCAO()) {
+					pcao->updateMeshCulling();
+					pcao->setChildrenVisible(
+							cam->getCameraMode() > CAMERA_MODE_FIRST);
+				}
+			}
+
+			m_seats[i].hud = h;
+		}
+	}
+
 	return true;
 }
 
@@ -1016,6 +1282,12 @@ bool Game::connectToServer(const GameStartData &start_data,
 	}
 
 
+	// Seat 0 uses the engine's main scene manager (the same one that holds
+	// the Sky, clouds, and the rest of the rendering pipeline). Passing
+	// nullptr for the scene_manager argument tells Client to default to it.
+	// Split-screen seats (1..N) get their own independent sub-managers
+	// created later in initializeSeats(); each one is fully isolated, so
+	// no per-seat visibility tricks are needed.
 	try {
 		client = new Client(start_data.name.c_str(),
 				start_data.password,
@@ -1023,7 +1295,9 @@ bool Game::connectToServer(const GameStartData &start_data,
 				itemdef_manager, nodedef_manager, sound_manager.get(), eventmgr,
 				m_rendering_engine,
 				m_item_visuals_manager.get(),
-				start_data.allow_login_or_register);
+				start_data.allow_login_or_register,
+				nullptr,
+				666);
 	} catch (const BaseException &e) {
 		*error_message = fmtgettext("Error creating client: %s", e.what());
 		errorstream << *error_message << std::endl;
@@ -1420,6 +1694,19 @@ void Game::processUserInput(f32 dtime)
 
 	processKeyInput();
 	processItemSelection(&runData.new_playeritem);
+
+	// Split-screen: each extra seat gets its own pass through the
+	// player-facing key/hotbar handlers, driven by that seat's own
+	// InputHandler (typically a gamepad). Without this, only seat 0
+	// could open the inventory, drop items, or change the wielded slot.
+	if (m_splitscreen_seats > 1) {
+		for (u8 i = 1; i < m_splitscreen_seats; i++) {
+			if (!m_seats[i].client || !m_seats[i].input)
+				continue;
+			processKeyInputForSeat(i);
+			processItemSelectionForSeat(i);
+		}
+	}
 }
 
 
@@ -1433,7 +1720,15 @@ void Game::processKeyInput()
 		if (g_settings->getBool("continuous_forward"))
 			toggleAutoforward();
 	} else if (wasKeyDown(KeyType::INVENTORY)) {
-		m_game_formspec.showPlayerInventory(nullptr);
+		// Single-player: pass an empty viewport so the menu uses the
+		// full window (legacy behaviour). Split-screen: clamp seat 0's
+		// inventory to its own panel, matching how seats 1..N open
+		// theirs in processKeyInputForSeat().
+		if (m_splitscreen_seats > 1)
+			m_game_formspec.showPlayerInventory(nullptr, 0, client,
+					&input->joystick, getSeatViewport(0));
+		else
+			m_game_formspec.showPlayerInventory(nullptr);
 	} else if (input->cancelPressed()) {
 #ifdef __ANDROID__
 		m_android_chat_open = false;
@@ -1585,6 +1880,141 @@ void Game::processItemSelection(u16 *new_playeritem)
 
 	// Clamp selection again in case it wasn't changed but max_item was
 	*new_playeritem = MYMIN(*new_playeritem, max_item);
+}
+
+
+core::rect<s32> Game::getSeatViewport(u8 seat_idx) const
+{
+	const v2u32 screensize = driver->getScreenSize();
+	const s32 W = (s32)screensize.X;
+	const s32 H = (s32)screensize.Y;
+	const core::rect<s32> fullvp(0, 0, W, H);
+
+	if (m_splitscreen_seats <= 1)
+		return fullvp;
+
+	const s32 HW = W / 2;
+	const s32 HH = H / 2;
+	switch (m_splitscreen_seats) {
+	case 2:
+		return seat_idx == 0 ? core::rect<s32>(0, 0, W, HH)
+				     : core::rect<s32>(0, HH, W, H);
+	case 3:
+		if (seat_idx == 0) return core::rect<s32>(0, 0, HW, HH);
+		if (seat_idx == 1) return core::rect<s32>(HW, 0, W, HH);
+		return core::rect<s32>(0, HH, W, H);
+	case 4:
+	default:
+		if (seat_idx == 0) return core::rect<s32>(0, 0, HW, HH);
+		if (seat_idx == 1) return core::rect<s32>(HW, 0, W, HH);
+		if (seat_idx == 2) return core::rect<s32>(0, HH, HW, H);
+		return core::rect<s32>(HW, HH, W, H);
+	}
+}
+
+
+void Game::processKeyInputForSeat(u8 seat_idx)
+{
+	// Note: this runs *in addition* to processKeyInput() (which handles
+	// seat 0). It deliberately handles only the subset of keys that make
+	// sense per-player; truly global toggles (sound mute / volume,
+	// pause menu, screenshot, debug overlays, ...) intentionally stay
+	// seat-0-only because they affect the shared engine state and we do
+	// not want a second controller to silently mute the whole game.
+	auto &seat = m_seats[seat_idx];
+	InputHandler *seat_in = seat.input.get();
+	Client *seat_client = seat.client;
+
+	// Drop the wielded stack from this seat's inventory. This goes through
+	// the seat's own Client so the inventory action is mirrored on the
+	// server-side player matching that seat.
+	if (seat_in->wasKeyDown(KeyType::DROP)) {
+		LocalPlayer *sp = seat_client->getEnv().getLocalPlayer();
+		if (sp) {
+			IDropAction *a = new IDropAction();
+			a->count = seat_in->isKeyDown(KeyType::SNEAK) ? 1 : 0;
+			a->from_inv.setCurrentPlayer();
+			a->from_list = "main";
+			a->from_i = sp->getWieldIndex();
+			seat_client->inventoryAction(a);
+		}
+	}
+
+	// Auto-forward toggle. continuous_forward is a global setting today
+	// (see updatePlayerControl), so this still affects every seat - but
+	// we still want the gamepad button to *work* for non-primary seats
+	// instead of silently doing nothing.
+	if (seat_in->wasKeyDown(KeyType::AUTOFORWARD)) {
+		toggleAutoforward();
+	} else if (seat_in->wasKeyDown(KeyType::BACKWARD)) {
+		if (g_settings->getBool("continuous_forward"))
+			toggleAutoforward();
+	}
+
+	// Inventory: open *this seat's* player inventory. The check is
+	// per-seat now: each seat has its own formspec slot (see
+	// `GameFormSpec::m_seat_formspec`) so seat 1 can open / close
+	// their inventory while seat 2 already has theirs open without
+	// either menu stealing the other's focus. The viewport restricts
+	// layout to this seat's panel.
+	if (seat_in->wasKeyDown(KeyType::INVENTORY) &&
+			!m_game_formspec.isSeatMenuActive(seat_idx)) {
+		m_game_formspec.showPlayerInventory(nullptr, seat_idx,
+				seat_client, &seat_in->joystick,
+				getSeatViewport(seat_idx));
+	}
+}
+
+
+void Game::processItemSelectionForSeat(u8 seat_idx)
+{
+	auto &seat = m_seats[seat_idx];
+	InputHandler *seat_in = seat.input.get();
+	Client *seat_client = seat.client;
+	LocalPlayer *player = seat_client->getEnv().getLocalPlayer();
+	if (!player)
+		return;
+
+	if (!seat.new_playeritem_initialised) {
+		seat.new_playeritem = player->getWieldIndex();
+		seat.new_playeritem_initialised = true;
+	}
+
+	u16 max_item = player->getMaxHotbarItemcount();
+	if (max_item == 0)
+		return;
+	max_item -= 1;
+
+	// Hotbar cycle keys (gamepad shoulder buttons / d-pad). Mouse wheel
+	// is intentionally ignored here: it is owned by the keyboard+mouse
+	// seat (seat 0).
+	s32 dir = 0;
+	if (seat_in->wasKeyDown(KeyType::HOTBAR_NEXT))
+		dir = -1;
+	if (seat_in->wasKeyDown(KeyType::HOTBAR_PREV))
+		dir = 1;
+
+	if (dir < 0)
+		seat.new_playeritem =
+				seat.new_playeritem < max_item ? seat.new_playeritem + 1 : 0;
+	else if (dir > 0)
+		seat.new_playeritem =
+				seat.new_playeritem > 0 ? seat.new_playeritem - 1 : max_item;
+
+	for (u16 i = 0; i <= max_item; i++) {
+		if (seat_in->wasKeyDown((GameKeyType) (KeyType::SLOT_1 + i))) {
+			seat.new_playeritem = i;
+			break;
+		}
+	}
+
+	seat.new_playeritem = MYMIN(seat.new_playeritem, max_item);
+
+	// Push the selection to the seat's server connection so the
+	// authoritative wield index updates and other clients see the
+	// correct held item.
+	if (player->getWieldIndex() != seat.new_playeritem)
+		seat_client->setPlayerItem(seat.new_playeritem);
 }
 
 
@@ -2137,8 +2567,16 @@ inline void Game::step(f32 dtime)
 		server->step();
 	}
 
-	if (!m_is_paused)
-		client->step(dtime);
+	if (!m_is_paused) {
+		if (m_splitscreen_seats <= 1) {
+			client->step(dtime);
+		} else {
+			for (u8 i = 0; i < m_splitscreen_seats; i++) {
+				if (m_seats[i].client)
+					m_seats[i].client->step(dtime);
+			}
+		}
+	}
 }
 
 static void pauseNodeAnimation(PausedNodesList &paused, scene::ISceneNode *node) {
@@ -2241,8 +2679,29 @@ void Game::handleClientEvent_ShowFormSpec(ClientEvent *event, CameraOrientation 
 {
 	auto &fs = event->show_formspec;
 
+	// Server-pushed formspecs (chests, furnaces, custom UIs, ...) are
+	// queued on the seat's own Client. Route to that seat's slot so
+	// chest-on-seat-2 doesn't replace inventory-on-seat-0.
+	const u8 seat_idx = m_current_event_seat;
+	const bool is_split = m_splitscreen_seats > 1;
+	auto &seat = m_seats[seat_idx];
+	Client *seat_client = seat.client ? seat.client : client;
+	JoystickController *seat_joystick = nullptr;
+	if (seat_idx == 0) {
+		seat_joystick = &input->joystick;
+	} else if (seat.input) {
+		seat_joystick = &seat.input->joystick;
+	}
+	const core::rect<s32> seat_viewport =
+		is_split ? getSeatViewport(seat_idx) : core::rect<s32>(0, 0, 0, 0);
+
 	if (fs.formname->empty() && !fs.formspec->empty()) {
-		m_game_formspec.showPlayerInventory(fs.formspec);
+		m_game_formspec.showPlayerInventory(fs.formspec, seat_idx,
+				seat_client, seat_joystick, seat_viewport);
+	} else if (seat_idx > 0 || is_split) {
+		m_game_formspec.showFormSpecForSeat(seat_idx, seat_client,
+				seat_joystick, seat_viewport,
+				*fs.formspec, *fs.formname);
 	} else {
 		m_game_formspec.showFormSpec(*fs.formspec, *fs.formname);
 	}
@@ -2278,12 +2737,17 @@ void Game::handleClientEvent_HandleParticleEvent(ClientEvent *event,
 
 void Game::handleClientEvent_HudAdd(ClientEvent *event, CameraOrientation *cam)
 {
-	LocalPlayer *player = client->getEnv().getLocalPlayer();
+	// Route to the seat whose ClientEvent queue we're currently draining
+	// (set by processClientEvents). Without this, every seat's HUD events
+	// would be applied to seat 0's player, leaving any extra split-screen
+	// seats without a HUD at all.
+	auto &seat = m_seats[m_current_event_seat];
+	LocalPlayer *player = seat.client->getEnv().getLocalPlayer();
 
 	u32 server_id = event->hudadd->server_id;
 	// ignore if we already have a HUD with that ID
-	auto i = m_hud_server_to_client.find(server_id);
-	if (i != m_hud_server_to_client.end()) {
+	auto i = seat.hud_server_to_client.find(server_id);
+	if (i != seat.hud_server_to_client.end()) {
 		delete event->hudadd;
 		return;
 	}
@@ -2304,32 +2768,34 @@ void Game::handleClientEvent_HudAdd(ClientEvent *event, CameraOrientation *cam)
 	e->z_index   = event->hudadd->z_index;
 	e->text2     = event->hudadd->text2;
 	e->style     = event->hudadd->style;
-	m_hud_server_to_client[server_id] = player->addHud(e);
+	seat.hud_server_to_client[server_id] = player->addHud(e);
 
 	delete event->hudadd;
 }
 
 void Game::handleClientEvent_HudRemove(ClientEvent *event, CameraOrientation *cam)
 {
-	LocalPlayer *player = client->getEnv().getLocalPlayer();
+	auto &seat = m_seats[m_current_event_seat];
+	LocalPlayer *player = seat.client->getEnv().getLocalPlayer();
 
-	auto i = m_hud_server_to_client.find(event->hudrm.id);
-	if (i != m_hud_server_to_client.end()) {
+	auto i = seat.hud_server_to_client.find(event->hudrm.id);
+	if (i != seat.hud_server_to_client.end()) {
 		HudElement *e = player->removeHud(i->second);
 		delete e;
-		m_hud_server_to_client.erase(i);
+		seat.hud_server_to_client.erase(i);
 	}
 
 }
 
 void Game::handleClientEvent_HudChange(ClientEvent *event, CameraOrientation *cam)
 {
-	LocalPlayer *player = client->getEnv().getLocalPlayer();
+	auto &seat = m_seats[m_current_event_seat];
+	LocalPlayer *player = seat.client->getEnv().getLocalPlayer();
 
 	HudElement *e = nullptr;
 
-	auto i = m_hud_server_to_client.find(event->hudchange->id);
-	if (i != m_hud_server_to_client.end()) {
+	auto i = seat.hud_server_to_client.find(event->hudchange->id);
+	if (i != seat.hud_server_to_client.end()) {
 		e = player->getHud(i->second);
 	}
 
@@ -2512,12 +2978,49 @@ void Game::handleClientEvent_UpdateCamera(ClientEvent *event, CameraOrientation 
 
 void Game::processClientEvents(CameraOrientation *cam)
 {
+	// Seat 0: drain the queue against the live `client` / `cam_view_target`.
+	// m_current_event_seat tells per-seat handlers (Hud*, ...) which
+	// SeatRuntime to mutate; without it every extra seat's HUD events
+	// would land in seat 0's HudElement list and the other seats would
+	// render with no hearts / hotbar / lua HUDs at all.
+	m_current_event_seat = 0;
 	while (client->hasClientEvents()) {
 		std::unique_ptr<ClientEvent> event(client->getClientEvent());
 		FATAL_ERROR_IF(event->type >= CLIENTEVENT_MAX, "Invalid clientevent type");
 		const ClientEventHandler& evHandler = clientEventHandler[event->type];
 		(this->*evHandler.handler)(event.get(), cam);
 	}
+
+	if (m_splitscreen_seats <= 1)
+		return;
+
+	// Seats 1..N: each has its own Client (and ClientEvent queue). We
+	// temporarily swap the global `client` pointer so handlers that read
+	// it (PlayerDamage's modsLoaded() check, particle handler, ...) see
+	// the right Client. PlayerForceMove writes through the `cam`
+	// parameter, so feed each seat its own CameraOrientation too,
+	// otherwise a server-side setplayer() on seat 1 would yank seat 0's
+	// view.
+	Client *saved_client = client;
+	for (u8 i = 1; i < m_splitscreen_seats; i++) {
+		auto &seat = m_seats[i];
+		if (!seat.client)
+			continue;
+
+		m_current_event_seat = i;
+		client = seat.client;
+
+		while (client->hasClientEvents()) {
+			std::unique_ptr<ClientEvent> event(client->getClientEvent());
+			FATAL_ERROR_IF(event->type >= CLIENTEVENT_MAX,
+					"Invalid clientevent type");
+			const ClientEventHandler& evHandler =
+					clientEventHandler[event->type];
+			(this->*evHandler.handler)(event.get(), &seat.cam_view);
+		}
+	}
+	client = saved_client;
+	m_current_event_seat = 0;
 }
 
 void Game::updateChat(f32 dtime)
@@ -2563,79 +3066,116 @@ void Game::updateChat(f32 dtime)
 
 void Game::updateCamera(f32 dtime)
 {
-	ClientEnvironment &env = client->getEnv();
-	LocalPlayer *player = env.getLocalPlayer();
+	auto update_one = [this, dtime](Client *c, Camera *cam) {
+		ClientEnvironment &env = c->getEnv();
+		LocalPlayer *player = env.getLocalPlayer();
 
-	// For interaction purposes, get info about the held item
-	ItemStack playeritem, hand;
-	{
-		ItemStack selected;
-		playeritem = player->getWieldedItem(&selected, &hand);
-	}
+		// For interaction purposes, get info about the held item
+		ItemStack playeritem, hand;
+		{
+			ItemStack selected;
+			playeritem = player->getWieldedItem(&selected, &hand);
+		}
 
-	ToolCapabilities playeritem_toolcap =
-		playeritem.getToolCapabilities(itemdef_manager, &hand);
+		ToolCapabilities playeritem_toolcap =
+			playeritem.getToolCapabilities(itemdef_manager, &hand);
 
-	float full_punch_interval = playeritem_toolcap.full_punch_interval;
-	float tool_reload_ratio = runData.time_from_last_punch / full_punch_interval;
+		float full_punch_interval = playeritem_toolcap.full_punch_interval;
+		float tool_reload_ratio = runData.time_from_last_punch / full_punch_interval;
 
-	tool_reload_ratio = std::min(tool_reload_ratio, 1.0f);
-	camera->update(player, dtime, tool_reload_ratio);
-	camera->step(dtime);
+		tool_reload_ratio = std::min(tool_reload_ratio, 1.0f);
+		cam->update(player, dtime, tool_reload_ratio);
+		cam->step(dtime);
 
-	if (!m_flags.disable_camera_update) {
-		client->getEnv().getClientMap().updateCamera(camera->getPosition(),
-			camera->getDirection(), camera->getFovMax(), camera->getOffset(),
-			player->light_color);
+		if (!m_flags.disable_camera_update) {
+			c->getEnv().getClientMap().updateCamera(cam->getPosition(),
+				cam->getDirection(), cam->getFovMax(), cam->getOffset(),
+				player->light_color);
+		}
+	};
+
+	update_one(client, camera);
+	if (m_splitscreen_seats > 1) {
+		for (u8 i = 1; i < m_splitscreen_seats; i++) {
+			if (m_seats[i].client && m_seats[i].camera)
+				update_one(m_seats[i].client, m_seats[i].camera);
+		}
 	}
 }
 
 void Game::updateCameraMode()
 {
-	LocalPlayer *player = client->getEnv().getLocalPlayer();
+	auto update_one = [](Client *c, Camera *cam) {
+		if (!c || !cam)
+			return;
 
-	// Obey server choice
-	if (player->allowed_camera_mode != CAMERA_MODE_ANY)
-		camera->setCameraMode(player->allowed_camera_mode);
+		LocalPlayer *player = c->getEnv().getLocalPlayer();
 
-	GenericCAO *playercao = player->getCAO();
-	if (playercao) {
-		// Make the player visible depending on camera mode.
-		playercao->updateMeshCulling();
-		playercao->setChildrenVisible(camera->getCameraMode() > CAMERA_MODE_FIRST);
+		// Obey server choice
+		if (player->allowed_camera_mode != CAMERA_MODE_ANY)
+			cam->setCameraMode(player->allowed_camera_mode);
+
+		GenericCAO *playercao = player->getCAO();
+		if (playercao) {
+			// Make the player visible depending on camera mode.
+			playercao->updateMeshCulling();
+			playercao->setChildrenVisible(cam->getCameraMode() > CAMERA_MODE_FIRST);
+		}
+	};
+
+	update_one(client, camera);
+	if (m_splitscreen_seats > 1) {
+		for (u8 i = 1; i < m_splitscreen_seats; i++)
+			update_one(m_seats[i].client, m_seats[i].camera);
 	}
 }
 
 void Game::updateCameraOffset()
 {
-	ClientEnvironment &env = client->getEnv();
+	auto update_one = [this](u8 idx, bool update_globals) {
+		if (!m_seats[idx].client || !m_seats[idx].camera)
+			return false;
 
-	v3s16 old_camera_offset = camera->getOffset();
+		ClientEnvironment &env = m_seats[idx].client->getEnv();
+		Camera *cam = m_seats[idx].camera;
+		v3s16 old_camera_offset = cam->getOffset();
 
-	camera->updateOffset();
+		cam->updateOffset();
 
-	v3s16 camera_offset = camera->getOffset();
+		v3s16 camera_offset = cam->getOffset();
+		bool changed = camera_offset != old_camera_offset;
+		m_seats[idx].camera_offset_changed = changed;
+		if (!changed)
+			return false;
 
-	m_camera_offset_changed = camera_offset != old_camera_offset;
-	if (!m_camera_offset_changed)
-		return;
+		if (!m_flags.disable_camera_update) {
+			if (update_globals) {
+				auto *shadow = RenderingEngine::get_shadow_renderer();
+				if (shadow) {
+					shadow->getDirectionalLight().updateCameraOffset(cam);
+					// FIXME: I bet we can be smarter about this and don't need to redraw
+					// the shadow map at all, but this is for someone else to figure out.
+					if (!g_settings->getFlag("performance_tradeoffs"))
+						shadow->setForceUpdateShadowMap();
+				}
+			}
 
-	if (!m_flags.disable_camera_update) {
-		auto *shadow = RenderingEngine::get_shadow_renderer();
-		if (shadow) {
-			shadow->getDirectionalLight().updateCameraOffset(camera);
-			// FIXME: I bet we can be smarter about this and don't need to redraw
-			// the shadow map at all, but this is for someone else to figure out.
-			if (!g_settings->getFlag("performance_tradeoffs"))
-				shadow->setForceUpdateShadowMap();
+			env.getClientMap().updateCamera(cam->getPosition(),
+				cam->getDirection(), cam->getFovMax(), camera_offset,
+				env.getLocalPlayer()->light_color);
+
+			env.updateCameraOffset(camera_offset);
+			if (update_globals)
+				clouds->updateCameraOffset(camera_offset);
 		}
 
-		env.getClientMap().updateCamera(camera->getPosition(),
-			camera->getDirection(), camera->getFovMax(), camera_offset,
-			env.getLocalPlayer()->light_color);
+		return changed;
+	};
 
-		env.updateCameraOffset(camera_offset);
-		clouds->updateCameraOffset(camera_offset);
+	m_camera_offset_changed = update_one(0, true);
+	if (m_splitscreen_seats > 1) {
+		for (u8 i = 1; i < m_splitscreen_seats; i++)
+			update_one(i, false);
 	}
 }
 
@@ -3516,6 +4056,37 @@ void Game::updateFrame(ProfilerGraph *graph, RunStats *stats, f32 dtime,
 		camera->wield(tool_item, !skip_anim);
 	}
 
+	// Split-screen: each extra seat has its own Camera/wieldnode that needs
+	// to be initialized with the player's actual held item, otherwise the
+	// wield mesh stays as the empty default ItemStack and the arm/tool
+	// never appears in their first-person view.
+	if (m_splitscreen_seats > 1) {
+		for (u8 i = 1; i < m_splitscreen_seats; i++) {
+			Client *sc = m_seats[i].client;
+			Camera *scam = m_seats[i].camera;
+			if (!sc || !scam)
+				continue;
+			LocalPlayer *sp = sc->getEnv().getLocalPlayer();
+			if (!sp)
+				continue;
+			// First-time priming: force the wield mesh once even if the
+			// inventory hasn't been "modified" since the seat connected.
+			// We track this with a flag on SeatRuntime so we only do the
+			// initial prime, then rely on updateWieldedItem() afterwards.
+			bool needs_update = sc->updateWieldedItem();
+			if (!m_seats[i].wield_primed) {
+				needs_update = true;
+				m_seats[i].wield_primed = true;
+			}
+			if (needs_update) {
+				ItemStack selected_item, hand_item;
+				ItemStack &tool_item = sp->getWieldedItem(&selected_item, &hand_item);
+				bool skip_anim = sc->consumeSkipNextWieldAnimation();
+				scam->wield(tool_item, !skip_anim);
+			}
+		}
+	}
+
 	/*
 		Update block draw list every 200ms or when camera direction has
 		changed much
@@ -3542,6 +4113,35 @@ void Game::updateFrame(ProfilerGraph *graph, RunStats *stats, f32 dtime,
 		runData.touch_blocks_timer = 0;
 	} else if (RenderingEngine::get_shadow_renderer()) {
 		updateShadows();
+	}
+
+	// Split-screen: the main draw-list/touch logic above only drives the
+	// primary global `client`. Each additional in-process client has its own
+	// ClientMap and draw list, so keep those updated too; otherwise seat 1+
+	// can draw CAOs and sky but no map blocks.
+	if (m_splitscreen_seats > 1) {
+		for (u8 i = 1; i < m_splitscreen_seats; i++) {
+			if (!m_seats[i].client || !m_seats[i].camera)
+				continue;
+
+			ClientMap &seat_map = m_seats[i].client->getEnv().getClientMap();
+			v3f seat_camera_direction = m_seats[i].camera->getDirection();
+			m_seats[i].update_draw_list_timer += dtime;
+			m_seats[i].touch_blocks_timer += dtime;
+
+			if (m_seats[i].update_draw_list_timer >= update_draw_list_delta
+					|| m_seats[i].update_draw_list_last_cam_dir
+							.getDistanceFrom(seat_camera_direction) > 0.2f
+					|| m_seats[i].camera_offset_changed
+					|| seat_map.needsUpdateDrawList()) {
+				m_seats[i].update_draw_list_timer = 0.0f;
+				seat_map.updateDrawList();
+				m_seats[i].update_draw_list_last_cam_dir = seat_camera_direction;
+			} else if (m_seats[i].touch_blocks_timer > touch_mapblock_delta) {
+				seat_map.touchMapBlocks();
+				m_seats[i].touch_blocks_timer = 0.0f;
+			}
+		}
 	}
 
 	m_game_ui->update(*stats, client, draw_control, cam, runData.pointed_old,
@@ -3676,24 +4276,263 @@ void Game::drawScene(ProfilerGraph *graph, RunStats *stats)
 	TimeTaker tt_draw("Draw scene", nullptr, PRECISION_MICRO);
 	this->driver->beginScene(true, true, sky_color);
 
-	const LocalPlayer *player = this->client->getEnv().getLocalPlayer();
-	bool draw_wield_tool = (this->m_game_ui->m_flags.show_hud &&
-			(player->hud_flags & HUD_FLAG_WIELDITEM_VISIBLE) &&
-			(this->camera->getCameraMode() == CAMERA_MODE_FIRST));
-	bool draw_crosshair = (
-			(player->hud_flags & HUD_FLAG_CROSSHAIR_VISIBLE) &&
-			(this->camera->getCameraMode() != CAMERA_MODE_THIRD_FRONT));
+	const v2u32 screensize = this->driver->getScreenSize();
+	const core::rect<s32> fullvp(0, 0, screensize.X, screensize.Y);
+	const core::rect<s32> vp_top(0, 0, screensize.X, (s32)(screensize.Y / 2));
+	const core::rect<s32> vp_bottom(0, (s32)(screensize.Y / 2), screensize.X, (s32)screensize.Y);
 
-	if (isTouchShootlineUsed())
-		draw_crosshair = false;
+	// Couch co-op rendering.
+	//
+	// Single-seat path: just call the normal pipeline-based draw.
+	// Split-screen path: render every seat into its own off-screen texture
+	// (so each seat can draw scene + wield + HUD without any other seat's
+	// content polluting it), then 2D-blit each texture into its viewport
+	// rectangle on screen.
+	//
+	// Each seat's Client owns an independent scene::ISceneManager (created
+	// in Game::initializeSeats() via smgr->createNewSceneManager(false)).
+	// That means seat N's CAOs / ClientMap / camera helper nodes live in a
+	// scene tree that doesn't contain any other seat's content - so drawing
+	// a seat is just "activate its smgr's camera and call drawAll() on its
+	// smgr". No cross-seat visibility juggling is needed; the local-player
+	// mesh hide already works correctly in single-player mode and the same
+	// path now applies to every seat.
+	//
+	// This bypasses the post-processing pipeline (ScreenTarget always clears
+	// the entire framebuffer, which would wipe each previous seat's render),
+	// so split-screen mode currently lacks features like FXAA / bloom. It
+	// keeps shadows-off, plain-pipeline rendering for each seat. Adding the
+	// post-processing pipeline back would mean swapping the pipeline's
+	// ScreenTarget for a per-seat TextureBufferOutput - a follow-up.
+	m_seats[0].scene_root = client->getSceneRoot();
 
-	this->m_rendering_engine->draw_scene(sky_color, this->m_game_ui->m_flags.show_hud,
-			draw_wield_tool, draw_crosshair);
+	auto draw_one_fullscreen = [&](u8 idx, const core::rect<s32> &vp, bool show_hud) {
+		if (!m_seats[idx].client || !m_seats[idx].camera || !m_seats[idx].hud)
+			return;
+
+		this->driver->setViewPort(vp);
+		// Activate this seat's camera in its own scene manager (= the
+		// engine's main smgr for seat 0; an independent sub-manager for
+		// any seat created by initializeSeats()).
+		m_seats[idx].client->getSceneManager()->setActiveCamera(
+				m_seats[idx].camera->getCameraNode());
+
+		const LocalPlayer *player = m_seats[idx].client->getEnv().getLocalPlayer();
+		bool draw_wield_tool = (show_hud &&
+				(player->hud_flags & HUD_FLAG_WIELDITEM_VISIBLE) &&
+				(m_seats[idx].camera->getCameraMode() == CAMERA_MODE_FIRST));
+		bool draw_crosshair = (show_hud &&
+				(player->hud_flags & HUD_FLAG_CROSSHAIR_VISIBLE) &&
+				(m_seats[idx].camera->getCameraMode() != CAMERA_MODE_THIRD_FRONT));
+
+		this->m_rendering_engine->draw_scene_for(
+				m_seats[idx].client,
+				m_seats[idx].hud,
+				sky_color,
+				show_hud,
+				draw_wield_tool,
+				draw_crosshair);
+	};
+
+	// Pick the viewport rectangle for each seat based on the configured
+	// number of seats. Shared with menu/formspec routing via
+	// Game::getSeatViewport() so that e.g. a per-seat inventory opens
+	// inside exactly the rectangle that seat is being rendered into.
+	auto get_viewport = [&](u8 idx) -> core::rect<s32> {
+		return getSeatViewport(idx);
+	};
+
+	// Make sure each seat has an off-screen render target sized to its
+	// viewport. Recreate when the viewport size changes (e.g. window resize).
+	auto ensure_seat_tex = [&](u8 idx, const core::rect<s32> &vp) -> video::ITexture * {
+		const u32 w = (u32)std::max<s32>(1, vp.getWidth());
+		const u32 h = (u32)std::max<s32>(1, vp.getHeight());
+		auto target_size = core::dimension2du(w, h);
+		if (m_seats[idx].render_tex) {
+			if (m_seats[idx].render_tex->getSize() != target_size) {
+				this->driver->removeTexture(m_seats[idx].render_tex);
+				m_seats[idx].render_tex = nullptr;
+			}
+		}
+		if (!m_seats[idx].render_tex) {
+			std::string name = "seat" + itos(idx) + "_color";
+			m_seats[idx].render_tex = this->driver->addRenderTargetTexture(
+					target_size, name.c_str(), video::ECF_A8R8G8B8);
+		}
+		return m_seats[idx].render_tex;
+	};
+
+	// Render one seat into its off-screen texture using the simple
+	// (non-pipeline) path: scene -> map post-fx -> wield -> hud.
+	//
+	// Each seat's Client has its own scene::ISceneManager (created in
+	// initializeSeats()). That scene manager contains *only* this seat's
+	// world: its ClientMap, its CAOs, its camera helper nodes. So we
+	// don't need to touch visibility on anything - we just point the
+	// seat's smgr at the seat's camera and call drawAll() on it.
+	auto draw_one_to_texture = [&](u8 idx, const core::rect<s32> &vp) {
+		if (!m_seats[idx].client || !m_seats[idx].camera || !m_seats[idx].hud)
+			return;
+		auto *tex = ensure_seat_tex(idx, vp);
+		if (!tex)
+			return;
+
+		// Bind and clear the per-seat texture.
+		this->driver->setRenderTarget(tex,
+				/*clearBackBuffer=*/true,
+				/*clearZBuffer=*/true,
+				sky_color);
+		const auto tex_size = tex->getSize();
+		this->driver->setViewPort(core::rect<s32>(
+				0, 0, (s32)tex_size.Width, (s32)tex_size.Height));
+
+		// Use the seat's camera and pin its aspect to the viewport so the
+		// world isn't horizontally squashed when we render to a smaller
+		// rectangle.
+		auto *seat_smgr = m_seats[idx].client->getSceneManager();
+		auto *cam_node = m_seats[idx].camera->getCameraNode();
+		seat_smgr->setActiveCamera(cam_node);
+		const f32 vp_aspect = (f32)tex_size.Width / (f32)tex_size.Height;
+
+		// Camera::update() set the camera's vertical FOV based on the
+		// full window aspect. If we just swap in the (different) viewport
+		// aspect here, Irrlicht keeps the vertical FOV and recomputes the
+		// horizontal FOV as fov_x = 2*atan(aspect * tan(fov_y/2)). For a
+		// 2-up top/bottom split that doubles the viewport width-to-height
+		// ratio, so the horizontal FOV ends up around 140deg and every
+		// seat looks like it's wearing a fisheye lens.
+		//
+		// Step 1: recover the intended horizontal FOV from the
+		// full-window aspect.
+		// Step 2: cap the per-seat horizontal FOV. Even at the player's
+		// "normal" 72deg vertical setting, a 16:10 monitor already
+		// projects ~108deg horizontally, and that same 108deg in a 1920
+		// x501 split-pane reads as a fisheye because the wide-and-short
+		// shape exaggerates the perspective stretch at the edges. A
+		// ~80deg horizontal feels natural in a split pane.
+		// Step 3: derive a new vertical FOV from the (possibly capped)
+		// horizontal FOV and the seat's viewport aspect.
+		const v2u32 &full_window = RenderingEngine::getWindowSize();
+		const f32 win_aspect = full_window.Y > 0 ?
+				(f32)full_window.X / (f32)full_window.Y : vp_aspect;
+		const f32 fov_y_full = cam_node->getFOV();
+		f32 fov_x = 2.0f * std::atan(win_aspect *
+				std::tan(0.5f * fov_y_full));
+
+		constexpr f32 SPLITSCREEN_MAX_FOV_X_DEG = 90.0f;
+		const f32 max_fov_x = SPLITSCREEN_MAX_FOV_X_DEG *
+				(f32)(M_PI / 180.0);
+		if (fov_x > max_fov_x)
+			fov_x = max_fov_x;
+
+		const f32 fov_y_seat = 2.0f * std::atan(
+				std::tan(0.5f * fov_x) / vp_aspect);
+		cam_node->setAspectRatio(vp_aspect);
+		cam_node->setFOV(fov_y_seat);
+		cam_node->updateMatrices();
+
+		// Main 3D scene - draw THIS seat's scene manager (which contains
+		// only this seat's ClientMap + CAOs + camera helper nodes). The
+		// usual local-player-mesh culling inside GenericCAO works the
+		// same way it does in single-player: there's exactly one local
+		// player CAO in this scene, and its material-flag hide is
+		// already correct.
+		seat_smgr->drawAll();
+		this->driver->setTransform(video::ETS_WORLD, core::IdentityMatrix);
+
+		// Underwater / lava overlay etc.
+		m_seats[idx].client->getEnv().getClientMap().renderPostFx(
+				m_seats[idx].camera->getCameraMode());
+
+		// Wielded item.
+		const LocalPlayer *player = m_seats[idx].client->getEnv().getLocalPlayer();
+		const bool draw_wield_tool =
+				(player->hud_flags & HUD_FLAG_WIELDITEM_VISIBLE) &&
+				(m_seats[idx].camera->getCameraMode() == CAMERA_MODE_FIRST);
+		if (draw_wield_tool)
+			m_seats[idx].camera->drawWieldedTool();
+
+		// Per-seat HUD: temporarily tell the HUD to lay out for this
+		// viewport instead of the full window so hearts / hotbar / crosshair
+		// land where you expect inside the seat's panel.
+		const v2u32 vp_size((u32)tex_size.Width, (u32)tex_size.Height);
+		m_seats[idx].hud->setScreensizeOverride(vp_size);
+		m_seats[idx].hud->resizeHotbar();
+
+		const bool draw_crosshair =
+				(player->hud_flags & HUD_FLAG_CROSSHAIR_VISIBLE) &&
+				(m_seats[idx].camera->getCameraMode() != CAMERA_MODE_THIRD_FRONT);
+
+		m_seats[idx].hud->drawBlockBounds();
+		m_seats[idx].hud->drawSelectionMesh();
+		if (draw_crosshair)
+			m_seats[idx].hud->drawCrosshair();
+		m_seats[idx].hud->drawLuaElements(m_seats[idx].camera->getOffset());
+		m_seats[idx].camera->drawNametags();
+
+		// Drop the override so anything else (debug overlay, GUI environment,
+		// etc.) drawn after the per-seat block uses the real window size.
+		m_seats[idx].hud->setScreensizeOverride(v2u32(0, 0));
+		m_seats[idx].hud->resizeHotbar();
+	};
+
+	if (m_splitscreen_seats <= 1) {
+		// Single seat: keep the original full pipeline (post-FX, etc.).
+		draw_one_fullscreen(0, fullvp, this->m_game_ui->m_flags.show_hud);
+	} else {
+		// Render every seat into its own off-screen texture.
+		for (u8 i = 0; i < m_splitscreen_seats; i++)
+			draw_one_to_texture(i, get_viewport(i));
+
+		// Bind back to the real backbuffer for the 2D blit.
+		this->driver->setRenderTarget(nullptr, false, false, sky_color);
+		this->driver->setViewPort(fullvp);
+
+		// 2D-blit each seat's texture into its viewport region.
+		for (u8 i = 0; i < m_splitscreen_seats; i++) {
+			if (!m_seats[i].render_tex)
+				continue;
+			const auto vp = get_viewport(i);
+			const auto sz = m_seats[i].render_tex->getSize();
+			this->driver->draw2DImage(
+					m_seats[i].render_tex,
+					vp,
+					core::rect<s32>(0, 0, (s32)sz.Width, (s32)sz.Height));
+		}
+
+		// Thin separator lines between viewports for readability.
+		const video::SColor sep(255, 0, 0, 0);
+		const s32 W = (s32)screensize.X;
+		const s32 H = (s32)screensize.Y;
+		const s32 HW = W / 2;
+		const s32 HH = H / 2;
+		// Horizontal split at H/2 (always present in the 2/3/4 layouts).
+		this->driver->draw2DRectangle(sep, core::rect<s32>(0, HH - 1, W, HH + 1));
+		if (m_splitscreen_seats >= 3) {
+			// Vertical split across the top half (2-up / 3-up / 4-up).
+			const s32 v_top_max = (m_splitscreen_seats == 3) ? HH : H;
+			this->driver->draw2DRectangle(sep,
+					core::rect<s32>(HW - 1, 0, HW + 1, v_top_max));
+		}
+
+		// The single-seat path runs through the rendering pipeline, whose
+		// final DrawHUD step calls guienv->drawAll(). The split-screen
+		// path bypasses that pipeline entirely, which means menus
+		// (pause/exit menu, formspecs), the chat console and any GameUI
+		// text (debug overlay, status text, ...) wouldn't be drawn at
+		// all - so e.g. pressing Escape would seem to do nothing because
+		// the pause menu is created in the GUI env but never rendered.
+		// Draw the GUI env once across the full window so menus and HUD
+		// text overlay every seat.
+		guienv->drawAll();
+	}
+
+	this->driver->setViewPort(fullvp);
 
 	/*
 		Profiler graph
 	*/
-	v2u32 screensize = this->driver->getScreenSize();
+	// screensize already computed
 
 	if (this->m_game_ui->m_flags.show_profiler_graph) {
 		auto font = g_fontengine->getFont(

@@ -6,6 +6,7 @@
 
 #include "irrlichttypes.h"
 #include "content/subgames.h"
+#include <array>
 
 // Information provided from "main"
 struct GameParams
@@ -45,4 +46,12 @@ struct GameStartData : GameParams
 
 	// "world_path" must be kept in sync!
 	WorldSpec world_spec;
+
+	// Split-screen (client-side) couch multiplayer.
+	// MVP model: multiple real clients (multiple server connections) in one process.
+	bool splitscreen_enable = false;
+	u8 splitscreen_seats = 1; // 1 = normal, otherwise clamp 2..4
+	std::array<std::string, 4> splitscreen_names{};
+	std::array<std::string, 4> splitscreen_passwords{}; // runtime only; do not persist
+	std::string splitscreen_layout; // optional preset name (empty = default/auto)
 };

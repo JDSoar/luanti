@@ -132,6 +132,10 @@ public:
 	void draw_scene(video::SColor skycolor, bool show_hud,
 			bool draw_wield_tool, bool draw_crosshair);
 
+	// Multi-seat draw helper: render using the provided client/hud.
+	void draw_scene_for(Client *client, Hud *hud, video::SColor skycolor, bool show_hud,
+			bool draw_wield_tool, bool draw_crosshair);
+
 	void initialize(Client *client, Hud *hud);
 	void finalize();
 
@@ -167,6 +171,8 @@ private:
 	v2u32 _getWindowSize() const;
 
 	std::unique_ptr<RenderingCore> core;
+	Client *m_default_client = nullptr;
+	Hud *m_default_hud = nullptr;
 	IrrlichtDevice *m_device = nullptr;
 	video::IVideoDriver *driver;
 	MyEventReceiver *m_receiver = nullptr;
