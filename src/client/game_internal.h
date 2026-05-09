@@ -261,6 +261,11 @@ protected:
 		return input->wasKeyReleased(k);
 	}
 
+	/// Seat 0 keyboard/mouse should be cleared only when a menu that affects
+	/// or captures the primary player is open — not when another split-screen
+	/// seat alone has a viewport formspec (e.g. death screen).
+	bool primaryLocalInputBlockedByMenus() const;
+
 #ifdef __ANDROID__
 	void handleAndroidChatInput();
 #endif

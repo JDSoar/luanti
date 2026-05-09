@@ -1720,6 +1720,25 @@ void Game::updateStats(RunStats *stats, const FpsControl &draw_times,
 
 
 
+bool Game::primaryLocalInputBlockedByMenus() const
+{
+	if (!isMenuActive())
+		return false;
+	if (m_splitscreen_seats <= 1)
+		return true;
+
+	if (m_game_formspec.isSeatMenuActive(0))
+		return true;
+
+	// Fullscreen modals (pause, settings from pause, password, …) are not
+	// clipped to a viewport and should still capture the primary pointer/keys.
+	GUIModalMenu *top = g_menumgr.tryGetTopMenu();
+	if (!top)
+		return false;
+	const core::rect<s32> &vp = top->getViewport();
+	return vp.getWidth() <= 0 || vp.getHeight() <= 0;
+}
+
 /****************************************************************************
  Input handling
  ****************************************************************************/
@@ -1736,7 +1755,8 @@ void Game::processUserInput(f32 dtime)
 	}
 
 	// Reset input if window not active or some menu is active
-	if (!device->isWindowActive() || isMenuActive() || guienv->hasFocus(gui_chat_console.get())) {
+	if (!device->isWindowActive() || primaryLocalInputBlockedByMenus() ||
+			guienv->hasFocus(gui_chat_console.get())) {
 		if (m_game_focused) {
 			m_game_focused = false;
 			infostream << "Game lost focus" << std::endl;
@@ -2458,10 +2478,10 @@ void Game::updateCameraDirection(CameraOrientation *cam, float dtime)
 	this results in duplicated input. To avoid that, we don't enable relative
 	mouse mode if we're in touchscreen mode. */
 	if (cur_control)
-		cur_control->setRelativeMode(!g_touchcontrols && !isMenuActive());
+		cur_control->setRelativeMode(!g_touchcontrols && !primaryLocalInputBlockedByMenus());
 
 	if ((device->isWindowActive() && device->isWindowFocused()
-			&& !isMenuActive()) || input->isRandom()) {
+			&& !primaryLocalInputBlockedByMenus()) || input->isRandom()) {
 
 		if (cur_control && !input->isRandom()) {
 			// Mac OSX gets upset if this is set every frame
@@ -2823,7 +2843,21 @@ void Game::handleClientEvent_PlayerForceMove(ClientEvent *event, CameraOrientati
 
 void Game::handleClientEvent_DeathscreenLegacy(ClientEvent *event, CameraOrientation *cam)
 {
-	m_game_formspec.showDeathFormspecLegacy();
+	const u8 seat_idx = m_current_event_seat;
+	const bool is_split = m_splitscreen_seats > 1;
+	auto &seat = m_seats[seat_idx];
+	Client *seat_client = seat.client ? seat.client : client;
+	JoystickController *seat_joystick = nullptr;
+	if (seat_idx == 0) {
+		seat_joystick = &input->joystick;
+	} else if (seat.input) {
+		seat_joystick = &seat.input->joystick;
+	}
+	const core::rect<s32> seat_viewport =
+		is_split ? getSeatViewport(seat_idx) : core::rect<s32>(0, 0, 0, 0);
+
+	m_game_formspec.showDeathFormspecLegacy(
+			seat_idx, seat_client, seat_joystick, seat_viewport);
 }
 
 void Game::handleClientEvent_ShowFormSpec(ClientEvent *event, CameraOrientation *cam)
@@ -2863,11 +2897,31 @@ void Game::handleClientEvent_ShowFormSpec(ClientEvent *event, CameraOrientation 
 
 void Game::handleClientEvent_ShowCSMFormSpec(ClientEvent *event, CameraOrientation *cam)
 {
-	m_game_formspec.showCSMFormSpec(*event->show_formspec.formspec,
-		*event->show_formspec.formname);
+	auto &fs = event->show_formspec;
 
-	delete event->show_formspec.formspec;
-	delete event->show_formspec.formname;
+	const u8 seat_idx = m_current_event_seat;
+	const bool is_split = m_splitscreen_seats > 1;
+	auto &seat = m_seats[seat_idx];
+	Client *seat_client = seat.client ? seat.client : client;
+	JoystickController *seat_joystick = nullptr;
+	if (seat_idx == 0) {
+		seat_joystick = &input->joystick;
+	} else if (seat.input) {
+		seat_joystick = &seat.input->joystick;
+	}
+	const core::rect<s32> seat_viewport =
+		is_split ? getSeatViewport(seat_idx) : core::rect<s32>(0, 0, 0, 0);
+
+	if (seat_idx > 0 || is_split) {
+		m_game_formspec.showCSMFormSpecForSeat(seat_idx, seat_client,
+				seat_joystick, seat_viewport,
+				*fs.formspec, *fs.formname);
+	} else {
+		m_game_formspec.showCSMFormSpec(*fs.formspec, *fs.formname);
+	}
+
+	delete fs.formspec;
+	delete fs.formname;
 }
 
 void Game::handleClientEvent_ShowPauseMenuFormSpec(ClientEvent *event, CameraOrientation *cam)

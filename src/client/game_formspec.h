@@ -42,6 +42,13 @@ struct GameFormSpec
 		const core::rect<s32> &seat_viewport,
 		const std::string &formspec, const std::string &formname);
 	void showCSMFormSpec(const std::string &formspec, const std::string &formname);
+	/// Split-screen: CSM `show_formspec` must use the originating seat's slot,
+	/// script instance, joystick, and viewport — otherwise it would always
+	/// open on seat 0 with a fullscreen layout and cover every player's panel.
+	void showCSMFormSpecForSeat(u8 seat_idx, Client *seat_client,
+		JoystickController *seat_joystick,
+		const core::rect<s32> &seat_viewport,
+		const std::string &formspec, const std::string &formname);
 	// Used by the Lua pause menu environment to show formspecs.
 	// Currently only used for the in-game settings menu.
 	void showPauseMenuFormSpec(const std::string &formspec, const std::string &formname);
@@ -61,7 +68,12 @@ struct GameFormSpec
 		Client *seat_client = nullptr,
 		JoystickController *seat_joystick = nullptr,
 		const core::rect<s32> &seat_viewport = core::rect<s32>(0, 0, 0, 0));
-	void showDeathFormspecLegacy();
+	/// Network packet `TOCLIENT_DEATHSCREEN_LEGACY`. In split-screen, `seat_*`
+	/// must match the client whose queue received the event so the overlay is
+	/// confined to that seat (see `Game::handleClientEvent_DeathscreenLegacy`).
+	void showDeathFormspecLegacy(u8 seat_idx, Client *seat_client,
+		JoystickController *seat_joystick,
+		const core::rect<s32> &seat_viewport);
 	// Shows the hardcoded "main" pause menu.
 	void showPauseMenu();
 

@@ -326,6 +326,33 @@ void GameFormSpec::showCSMFormSpec(const std::string &formspec, const std::strin
 	m_seat_formspec[0]->setName(formname);
 }
 
+void GameFormSpec::showCSMFormSpecForSeat(u8 seat_idx, Client *seat_client,
+	JoystickController *seat_joystick,
+	const core::rect<s32> &seat_viewport,
+	const std::string &formspec, const std::string &formname)
+{
+	if (seat_idx >= m_seat_formspec.size())
+		return;
+
+	Client *c = seat_client ? seat_client : m_client;
+	JoystickController *jc = seat_joystick ? seat_joystick : &m_input->joystick;
+
+	if (handleEmptyFormspec(seat_idx, formspec, formname))
+		return;
+
+	FormspecFormSource *fs_src = new FormspecFormSource(formspec);
+	LocalScriptingFormspecHandler *txt_dst =
+		new LocalScriptingFormspecHandler(formname, c->getScript());
+
+	GUIFormSpecMenu::create(m_seat_formspec[seat_idx], c,
+			m_rendering_engine->get_gui_env(),
+			jc, fs_src, txt_dst, c->getFormspecPrepend(),
+			c->getSoundManager());
+	if (seat_viewport.getWidth() > 0 && seat_viewport.getHeight() > 0)
+		m_seat_formspec[seat_idx]->setViewport(seat_viewport);
+	m_seat_formspec[seat_idx]->setName(formname);
+}
+
 void GameFormSpec::showPauseMenuFormSpec(const std::string &formspec, const std::string &formname)
 {
 	// The pause menu env is a trusted context like the mainmenu env and provides
@@ -551,8 +578,16 @@ void GameFormSpec::showPauseMenu()
 	m_seat_formspec[0]->doPause = true;
 }
 
-void GameFormSpec::showDeathFormspecLegacy()
+void GameFormSpec::showDeathFormspecLegacy(u8 seat_idx, Client *seat_client,
+	JoystickController *seat_joystick,
+	const core::rect<s32> &seat_viewport)
 {
+	if (seat_idx >= m_seat_formspec.size())
+		return;
+
+	Client *c = seat_client ? seat_client : m_client;
+	JoystickController *jc = seat_joystick ? seat_joystick : &m_input->joystick;
+
 	static std::string formspec_str =
 		std::string("formspec_version[1]") +
 		SIZE_TAG
@@ -565,13 +600,15 @@ void GameFormSpec::showDeathFormspecLegacy()
 	/* Note: FormspecFormSource and LocalFormspecHandler  *
 	 * are deleted by guiFormSpecMenu                     */
 	FormspecFormSource *fs_src = new FormspecFormSource(formspec_str);
-	LegacyDeathFormspecHandler *txt_dst = new LegacyDeathFormspecHandler(m_client);
+	LegacyDeathFormspecHandler *txt_dst = new LegacyDeathFormspecHandler(c);
 
-	GUIFormSpecMenu::create(m_seat_formspec[0], m_client,
+	GUIFormSpecMenu::create(m_seat_formspec[seat_idx], c,
 		m_rendering_engine->get_gui_env(),
-		&m_input->joystick, fs_src, txt_dst, m_client->getFormspecPrepend(),
-		m_client->getSoundManager());
-	m_seat_formspec[0]->setFocus("btn_respawn");
+		jc, fs_src, txt_dst, c->getFormspecPrepend(),
+		c->getSoundManager());
+	if (seat_viewport.getWidth() > 0 && seat_viewport.getHeight() > 0)
+		m_seat_formspec[seat_idx]->setViewport(seat_viewport);
+	m_seat_formspec[seat_idx]->setFocus("btn_respawn");
 }
 
 void GameFormSpec::update()

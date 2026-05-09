@@ -3162,7 +3162,12 @@ void GUIFormSpecMenu::regenerateGui(v2u32 screensize)
 	if (mydata.explicit_size) {
 		// compute scaling for specified form size
 		if (m_lock) {
-			v2u32 current_screensize = RenderingEngine::get_video_driver()->getScreenSize();
+			// Use the layout size already chosen for this menu (full window, or
+			// the split-screen viewport from GUIModalMenu::setViewport()), not the
+			// raw driver size. Centering a locked `size[,,true]` form against the
+			// physical monitor would push the whole dialog across split boundaries
+			// (e.g. builtin death screen) even when bgcolor respects the viewport.
+			v2u32 current_screensize = mydata.screensize;
 			v2u32 delta = current_screensize - m_lockscreensize;
 
 			if (current_screensize.Y > m_lockscreensize.Y)
