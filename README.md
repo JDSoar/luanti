@@ -12,6 +12,56 @@ Luanti is a free open-source voxel game engine with easy modding and game creati
 Copyright (C) 2010-2026 Perttu Ahola <celeron55@gmail.com>
 and contributors (see source file comments and the version control log)
 
+1. Clone your fork
+Open a terminal and run:
+`git clone https://github.com/JDSoar/luanti.git`
+`cd luanti`
+
+3. Install dependencies
+For Ubuntu / Debian / Linux Mint / Pop!_OS:
+`sudo apt update`
+`sudo apt install g++ make cmake libpng-dev libjpeg-dev libgl1-mesa-dev libsqlite3-dev \
+libogg-dev libvorbis-dev libopenal-dev libcurl4-gnutls-dev libfreetype6-dev \
+zlib1g-dev libgmp-dev libjsoncpp-dev libzstd-dev libluajit-5.1-dev \
+gettext libsdl2-dev`
+
+4. Compile it (Run-in-Place mode – easiest)
+`cmake . -DRUN_IN_PLACE=TRUE`
+`make -j$(nproc)`
+This will take a few minutes depending on your CPU.
+After it finishes, you can run it with:
+`./bin/luanti`
+5. Create a Desktop Icon
+Create a file called luanti.desktop in `~/.local/share/applications/`:
+`nano ~/.local/share/applications/luanti.desktop`
+
+Paste this content (change the paths if needed):
+```
+ini[Desktop Entry]
+Name=Luanti (My Fork)
+Comment=Open-source voxel game engine
+Exec=/home/YOUR-USERNAME/luanti/bin/luanti
+Icon=/home/YOUR-USERNAME/luanti/textures/base/pack/logo.png
+Terminal=false
+Type=Application
+Categories=Game;
+```
+Important: Replace /home/YOUR-USERNAME/ with your actual home path.
+Save and exit (Ctrl + O → Enter → Ctrl + X).
+Then make it executable:
+`chmod +x ~/.local/share/applications/luanti.desktop`
+Now search for “Luanti” in your applications menu — it should appear.
+
+Optional: Update your fork later
+`cd ~/luanti`
+`git pull`
+`cmake . -DRUN_IN_PLACE=TRUE`  # reconfigure if needed
+`make -j$(nproc)`
+
+
+
+
+
 Table of Contents
 ------------------
 
