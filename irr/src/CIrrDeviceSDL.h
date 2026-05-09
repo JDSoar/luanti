@@ -98,6 +98,10 @@ public:
 	//! Activate any joysticks, and generate events for them.
 	bool activateJoysticks(core::array<SJoystickInfo> &joystickInfo) override;
 
+	//! Trigger force-feedback rumble on a connected joystick (SDL only).
+	bool rumbleJoystick(u32 joystickIndex, u16 lowFrequencyRumble,
+			u16 highFrequencyRumble, u32 durationMs) override;
+
 	//! Get the device type
 	E_DEVICE_TYPE getType() const override
 	{

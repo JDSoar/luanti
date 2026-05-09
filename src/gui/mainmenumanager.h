@@ -9,8 +9,10 @@
 */
 #include "modalMenu.h"
 #include "touchcontrols.h" // g_touchcontrols
+#include <algorithm>
 #include <cassert>
 #include <list>
+#include <vector>
 
 #include <IGUIEnvironment.h>
 
@@ -120,9 +122,22 @@ public:
 		// the menu filters by joystick id internally. Broadcasting the
 		// event lets seat 1's gamepad scroll seat 1's inventory even
 		// when seat 2's inventory is on top of the stack.
+		//
+		// SAFETY: any `mm->preprocessEvent(event)` below can synchronously
+		// destroy `mm` (e.g. the gamepad's mapped INVENTORY / ESC button
+		// closes the menu, which calls ~GUIModalMenu → deletingMenu →
+		// m_stack.remove(menu)). That would invalidate a live iterator
+		// over `m_stack` and the next access dereferences a freed
+		// IGUIElement, crashing in __dynamic_cast on the stale vtable.
+		// Snapshot the stack first and re-check membership before each
+		// dispatch so a self-removing menu can't pull the rug out.
 		if (event.EventType == EET_JOYSTICK_INPUT_EVENT) {
+			std::vector<gui::IGUIElement *> snapshot(
+					m_stack.begin(), m_stack.end());
 			bool handled = false;
-			for (gui::IGUIElement *e : m_stack) {
+			for (gui::IGUIElement *e : snapshot) {
+				if (!isStillInStack(e))
+					continue;
 				GUIModalMenu *mm = dynamic_cast<GUIModalMenu *>(e);
 				if (mm && mm->preprocessEvent(event))
 					handled = true;
@@ -145,7 +160,11 @@ public:
 				py = event.TouchInput.Y;
 			}
 			const core::position2d<s32> pt(px, py);
-			for (auto it = m_stack.rbegin(); it != m_stack.rend(); ++it) {
+			std::vector<gui::IGUIElement *> snapshot(
+					m_stack.begin(), m_stack.end());
+			for (auto it = snapshot.rbegin(); it != snapshot.rend(); ++it) {
+				if (!isStillInStack(*it))
+					continue;
 				GUIModalMenu *mm = dynamic_cast<GUIModalMenu *>(*it);
 				if (!mm)
 					continue;
@@ -191,6 +210,14 @@ public:
 	}
 
 private:
+	// True iff `e` is currently in `m_stack`. Used to skip snapshot entries
+	// that were destroyed (and thus removed from m_stack via deletingMenu)
+	// while we were dispatching events to other entries.
+	bool isStillInStack(gui::IGUIElement *e) const
+	{
+		return std::find(m_stack.begin(), m_stack.end(), e) != m_stack.end();
+	}
+
 	std::list<gui::IGUIElement*> m_stack;
 };
 

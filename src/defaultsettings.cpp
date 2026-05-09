@@ -393,6 +393,9 @@ void set_default_settings()
 	settings->setDefault("repeat_joystick_button_time", "0.17");
 	settings->setDefault("joystick_frustum_sensitivity", "170");
 	settings->setDefault("joystick_deadzone", "2048");
+	settings->setDefault("debug_joystick_buttons", "false");
+	settings->setDefault("joystick_rumble_enable", "true");
+	settings->setDefault("joystick_rumble_strength", "0.7");
 
 	// Main menu
 	settings->setDefault("main_menu_path", "");

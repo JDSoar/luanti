@@ -135,6 +135,9 @@ protected:
 	// Main loop
 
 	void updateInteractTimers(f32 dtime);
+	/// Zeroes movement / dig / place while a seat's GUIFormSpecMenu is open;
+	/// joystick movement uses analog speed which survives `InputHandler::clear()`.
+	void applyIdlePlayerControlForOpenMenu(const CameraOrientation &cam);
 	bool checkConnection();
 	void processQueues();
 	void updateProfilers(const RunStats &stats, const FpsControl &draw_times, f32 dtime);
@@ -300,6 +303,16 @@ private:
 		// using a single shared map would route every seat's HUD events
 		// to seat 0 and leave the other seats with no HUD at all.
 		std::unordered_map<u32, u32> hud_server_to_client;
+		// Per-seat copy of the run-time interaction state (digging
+		// progress, last pointed thing, place-repeat timer, etc.). The
+		// global Game::runData is owned by seat 0; whenever we dispatch
+		// processPlayerInteraction() to this seat we std::swap it with
+		// `runData` so each player has independent dig progress, their
+		// own selection-box halo, and so simultaneous mining by two
+		// seats does not have one player's "btn_down_for_dig" bleed
+		// into the other's frame. Initialised in createClient() to
+		// match what Game::createClient() does for seat 0's runData.
+		GameRunData run_data{};
 	};
 
 	struct Flags {

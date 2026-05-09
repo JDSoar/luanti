@@ -81,6 +81,7 @@
 
 	#define SDL_OpenJoystick SDL_JoystickOpen
 	#define SDL_GetJoystickName SDL_JoystickName
+	#define SDL_RumbleJoystick SDL_JoystickRumble
 
 	#define SDL_GetWindowSizeInPixels SDL_GL_GetDrawableSize
 	#define SDL_DestroySurface SDL_FreeSurface
@@ -1249,6 +1250,29 @@ bool CIrrDeviceSDL::activateJoysticks(core::array<SJoystickInfo> &joystickInfo)
 #endif // _IRR_COMPILE_WITH_JOYSTICK_EVENTS_
 
 	return false;
+}
+
+bool CIrrDeviceSDL::rumbleJoystick(u32 joystickIndex, u16 lowFrequencyRumble,
+		u16 highFrequencyRumble, u32 durationMs)
+{
+#if defined(_IRR_COMPILE_WITH_JOYSTICK_EVENTS_)
+	if (joystickIndex >= Joysticks.size() || !Joysticks[joystickIndex])
+		return false;
+	// SDL3: SDL_RumbleJoystick. SDL2: SDL_JoystickRumble (aliased above).
+	// Returns 0 on success in SDL2; SDL3 returns a bool. Treat any non-zero
+	// return as success in SDL2 land via the macro indirection.
+#ifdef _IRR_USE_SDL3_
+	return SDL_RumbleJoystick(Joysticks[joystickIndex],
+			lowFrequencyRumble, highFrequencyRumble, durationMs);
+#else
+	return SDL_RumbleJoystick(Joysticks[joystickIndex],
+			lowFrequencyRumble, highFrequencyRumble, durationMs) == 0;
+#endif
+#else
+	(void)joystickIndex; (void)lowFrequencyRumble;
+	(void)highFrequencyRumble; (void)durationMs;
+	return false;
+#endif
 }
 
 void CIrrDeviceSDL::updateSizeAndScale()

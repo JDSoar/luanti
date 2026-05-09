@@ -3047,6 +3047,8 @@ void GUIFormSpecMenu::regenerateGui(v2u32 screensize)
 	m_tooltips.clear();
 	m_tooltip_rects.clear();
 	m_inventory_rings.clear();
+	m_gamepad_inv_pointer_init = false;
+	m_gamepad_cursor_prev_ms = 0;
 	m_dropdowns.clear();
 	m_scroll_containers.clear();
 	theme_by_name.clear();
@@ -3502,6 +3504,8 @@ void GUIFormSpecMenu::drawMenu()
 	m_hovered_item_tooltips.clear();
 
 	updateSelectedItem();
+
+	stepGamepadInventoryCursor();
 
 	// Auto-scroll to center focused element when Tab enables focus tracking
 	autoScroll();
@@ -4106,6 +4110,157 @@ bool GUIFormSpecMenu::remapClickOutside(const SEvent &event)
 	return GUIModalMenu::remapClickOutside(event);
 }
 
+void GUIFormSpecMenu::ensureGamepadInventoryPointer()
+{
+	const core::rect<s32> clip = getAbsoluteClippingRect();
+
+	auto clamp_point = [&clip](v2s32 p) -> v2s32 {
+		const s32 max_x = std::max(clip.UpperLeftCorner.X + 1,
+				clip.LowerRightCorner.X - 2);
+		const s32 max_y = std::max(clip.UpperLeftCorner.Y + 1,
+				clip.LowerRightCorner.Y - 2);
+		p.X = rangelim(p.X, clip.UpperLeftCorner.X + 1, max_x);
+		p.Y = rangelim(p.Y, clip.UpperLeftCorner.Y + 1, max_y);
+		return p;
+	};
+
+	for (GUIInventoryList *ilist : m_inventorylists) {
+		if (!ilist || !ilist->isVisible())
+			continue;
+
+		const v2s32 slot = ilist->getSlotSize();
+		v2s32 center = ilist->getAbsolutePosition().UpperLeftCorner;
+		center.X += slot.X / 2;
+		center.Y += slot.Y / 2;
+		m_pointer = clamp_point(center);
+		m_old_pointer = m_pointer;
+		return;
+	}
+
+	const core::rect<s32> &vp = getViewport();
+	if (vp.getWidth() > 0 && vp.getHeight() > 0)
+		m_pointer = clamp_point(vp.getCenter());
+	else
+		m_pointer = clamp_point(clip.getCenter());
+	m_old_pointer = m_pointer;
+}
+
+void GUIFormSpecMenu::stepGamepadInventoryCursor()
+{
+	if (!m_joystick)
+		return;
+
+	const u64 now_ms = porting::getTimeMs();
+	if (m_gamepad_cursor_prev_ms == 0)
+		m_gamepad_cursor_prev_ms = now_ms;
+	float dt = (now_ms - m_gamepad_cursor_prev_ms) / 1000.f;
+	m_gamepad_cursor_prev_ms = now_ms;
+	dt = MYMIN(dt, 0.08f);
+
+	if (!m_gamepad_inv_pointer_init) {
+		ensureGamepadInventoryPointer();
+		m_gamepad_inv_pointer_init = true;
+		// On the very first frame, snap the OS cursor to where we placed
+		// the formspec pointer so the user immediately sees their starting
+		// position (otherwise the visible cursor lingers wherever the
+		// mouse was last left).
+		if (gui::ICursorControl *cc =
+				RenderingEngine::get_raw_device()->getCursorControl())
+			cc->setPosition(m_pointer.X, m_pointer.Y);
+	}
+
+	static constexpr float CURSOR_SPEED = 1400.f;
+	static constexpr float DPAD_CURSOR_SPEED = 1280.f;
+	float ax = m_joystick->getAxisWithoutDead(JA_FRUSTUM_HORIZONTAL);
+	float ay = m_joystick->getAxisWithoutDead(JA_FRUSTUM_VERTICAL);
+	// Allow the left stick to drive the cursor too (some users prefer it,
+	// and it keeps menus reachable on pads where one stick is broken).
+	ax += m_joystick->getAxisWithoutDead(JA_SIDEWARD_MOVE) * 0.45f;
+	ay += m_joystick->getAxisWithoutDead(JA_FORWARD_MOVE) * 0.45f;
+
+	// D-pad as discrete cursor steps (Minecraft-style inventory navigation).
+	// The Xbox D-pad now sets HOTBAR_PREV/HOTBAR_NEXT (left/right) and
+	// MINIMAP/CHAT (up/down) to mirror Minecraft Bedrock's controller scheme;
+	// see create_xbox_layout / handleEvent in joystick_controller.cpp.
+	// Those in-game actions do not fire while a menu is open (in-game input
+	// processing is bypassed by isMenuActive() in inputhandler.cpp), so it is
+	// safe to reuse them here purely as directional menu signals.
+	float dpx = 0.f, dpy = 0.f;
+	if (m_joystick->isKeyDown(KeyType::HOTBAR_PREV))
+		dpx -= 1.f;
+	if (m_joystick->isKeyDown(KeyType::HOTBAR_NEXT))
+		dpx += 1.f;
+	if (m_joystick->isKeyDown(KeyType::MINIMAP))
+		dpy -= 1.f;
+	if (m_joystick->isKeyDown(KeyType::CHAT))
+		dpy += 1.f;
+
+	if (dpx != 0.f || dpy != 0.f) {
+		ax += dpx * (DPAD_CURSOR_SPEED / CURSOR_SPEED);
+		ay += dpy * (DPAD_CURSOR_SPEED / CURSOR_SPEED);
+	}
+
+	if (ax != 0.f || ay != 0.f) {
+		m_pointer.X += (s32)(ax * CURSOR_SPEED * dt);
+		m_pointer.Y += (s32)(ay * CURSOR_SPEED * dt);
+
+		// Without an inventory list the formspec's clipping rect is fine
+		// to clamp against (e.g. pause menu). With one we still want to
+		// stay inside the menu so the slot hover detection works.
+		const core::rect<s32> clip = getAbsoluteClippingRect();
+		const s32 max_x = std::max(clip.UpperLeftCorner.X + 1,
+				clip.LowerRightCorner.X - 2);
+		const s32 max_y = std::max(clip.UpperLeftCorner.Y + 1,
+				clip.LowerRightCorner.Y - 2);
+		m_pointer.X = rangelim(m_pointer.X, clip.UpperLeftCorner.X + 1, max_x);
+		m_pointer.Y = rangelim(m_pointer.Y, clip.UpperLeftCorner.Y + 1, max_y);
+
+		// Drive the OS cursor along with the formspec pointer so the user
+		// can actually see what they're aiming at - otherwise only the
+		// invisible m_pointer moves and the visible cursor sits still.
+		if (gui::ICursorControl *cc =
+				RenderingEngine::get_raw_device()->getCursorControl())
+			cc->setPosition(m_pointer.X, m_pointer.Y);
+
+		SEvent move{};
+		move.EventType = EET_MOUSE_INPUT_EVENT;
+		move.MouseInput.Event = EMIE_MOUSE_MOVED;
+		move.MouseInput.X = m_pointer.X;
+		move.MouseInput.Y = m_pointer.Y;
+		move.MouseInput.ButtonStates = 0;
+		move.MouseInput.Simulated = true;
+		if (!preprocessEvent(move))
+			OnEvent(move);
+	}
+}
+
+void GUIFormSpecMenu::simulateInventoryMouseClick(bool right_click)
+{
+	irr_ptr<GUIModalMenu> holder;
+	holder.grab(this);
+
+	auto inject = [&](EMOUSE_INPUT_EVENT ev, u32 button_states) {
+		SEvent me{};
+		me.EventType = EET_MOUSE_INPUT_EVENT;
+		me.MouseInput.Event = ev;
+		me.MouseInput.X = m_pointer.X;
+		me.MouseInput.Y = m_pointer.Y;
+		me.MouseInput.ButtonStates = button_states;
+		me.MouseInput.Simulated = true;
+		if (!preprocessEvent(me))
+			OnEvent(me);
+	};
+
+	if (!right_click) {
+		inject(EMIE_LMOUSE_PRESSED_DOWN, SDL_BUTTON_MASK(SDL_BUTTON_LEFT));
+		inject(EMIE_LMOUSE_LEFT_UP, 0);
+	} else {
+		inject(EMIE_RMOUSE_PRESSED_DOWN, SDL_BUTTON_MASK(SDL_BUTTON_RIGHT));
+		inject(EMIE_RMOUSE_LEFT_UP, 0);
+	}
+	updateSelectedItem();
+}
+
 bool GUIFormSpecMenu::preprocessEvent(const SEvent& event)
 {
 	// This must be done first so that GUIModalMenu can set m_pointer_type
@@ -4209,14 +4364,40 @@ bool GUIFormSpecMenu::preprocessEvent(const SEvent& event)
 			return false;
 
 		bool handled = m_joystick->handleEvent(event.JoystickEvent);
-		if (handled) {
-			if (m_joystick->wasKeyDown(KeyType::ESC)) {
-				tryClose();
-			} else if (m_joystick->wasKeyDown(KeyType::JUMP)) {
-				trySubmitClose();
-			}
+		if (!handled)
+			return false;
+
+		// Start (ESC) closes any formspec.
+		if (m_joystick->wasKeyDown(KeyType::ESC)) {
+			tryClose();
+			return true;
 		}
-		return handled;
+
+		// Y (INVENTORY) toggles the inventory closed - and is also the
+		// natural "back / cancel" for any other gamepad-driven menu.
+		if (m_joystick->wasKeyDown(KeyType::INVENTORY)) {
+			tryClose();
+			return true;
+		}
+
+		// A (JUMP) and RT (DIG) act as a primary click on whatever the
+		// gamepad cursor is currently over. This works the same way for
+		// inventory slots (pick up / drop a stack) and for plain formspec
+		// buttons (Continue / Settings / Exit on the pause menu, the
+		// items inside the chest UI, etc.). LT (PLACE) is a secondary
+		// click - "drop one" in inventories, generally a no-op on a
+		// regular button but harmless to forward.
+		if (m_joystick->wasKeyDown(KeyType::DIG) ||
+				m_joystick->wasKeyDown(KeyType::JUMP)) {
+			simulateInventoryMouseClick(false);
+			return true;
+		}
+		if (m_joystick->wasKeyDown(KeyType::PLACE)) {
+			simulateInventoryMouseClick(true);
+			return true;
+		}
+
+		return true;
 	}
 
 	return false;

@@ -243,10 +243,17 @@ public:
 	virtual void clearWasKeyPressed()
 	{
 		m_receiver->clearWasKeyPressed();
+		// Match keyboard: batch-clear at end of processPlayerInteraction.
+		// Without this, JoystickController::m_keys_pressed stays latched until
+		// InputHandler::clear() (e.g. menus only), so `wasKeyPressed` is true
+		// on every frame while a face button is held — e.g. R3 toggles camera
+		// mode continuously and appears to "flash" between first/third person.
+		joystick.clearAllWasKeyPressed();
 	}
 	virtual void clearWasKeyReleased()
 	{
 		m_receiver->clearWasKeyReleased();
+		joystick.clearAllWasKeyReleased();
 	}
 
 	virtual void reloadKeybindings()
@@ -312,6 +319,16 @@ public:
 
 	void clear() override { joystick.clear(); }
 	void releaseAllKeys() override { joystick.releaseAllKeys(); }
+
+	void clearWasKeyPressed() override
+	{
+		joystick.clearAllWasKeyPressed();
+	}
+
+	void clearWasKeyReleased() override
+	{
+		joystick.clearAllWasKeyReleased();
+	}
 
 private:
 	MyEventReceiver *m_receiver = nullptr;

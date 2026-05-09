@@ -597,7 +597,10 @@ void Game::run()
 		// SeatRuntime[0]'s copy in sync so any code that reads it later
 		// (HUD layout, debug overlay, etc.) sees the same orientation.
 		m_seats[0].cam_view = cam_view;
-		updatePlayerControl(cam_view);
+		if (m_game_formspec.isSeatMenuActive(0))
+			applyIdlePlayerControlForOpenMenu(cam_view);
+		else
+			updatePlayerControl(cam_view);
 		// Split-screen: apply control for additional seats. Each extra seat
 		// gets its OWN cam_view, driven by its gamepad's right stick (the
 		// "frustum" axes), so seat 0's mouse never rotates seat 1's player
@@ -617,30 +620,38 @@ void Game::run()
 				CameraOrientation &sv = m_seats[i].cam_view;
 				InputHandler *seat_in = m_seats[i].input.get();
 
-				// Right-stick look (gamepad).
-				if (m_cache_enable_joysticks) {
-					sv.camera_yaw -=
-						seat_in->joystick.getAxisWithoutDead(
-							JA_FRUSTUM_HORIZONTAL) * stick_rate;
-					sv.camera_pitch +=
-						seat_in->joystick.getAxisWithoutDead(
-							JA_FRUSTUM_VERTICAL) * stick_rate;
+				// Don't rotate the camera from the right stick while this
+				// seat has a formspec open — that input drives the menu cursor.
+				if (!m_game_formspec.isSeatMenuActive(i)) {
+					// Right-stick look (gamepad).
+					if (m_cache_enable_joysticks) {
+						sv.camera_yaw -=
+							seat_in->joystick.getAxisWithoutDead(
+								JA_FRUSTUM_HORIZONTAL) * stick_rate;
+						sv.camera_pitch +=
+							seat_in->joystick.getAxisWithoutDead(
+								JA_FRUSTUM_VERTICAL) * stick_rate;
+					}
+					// Keybind-mapped look (keyboard `keymap_camera_*`).
+					// The Xbox D-pad no longer maps here — it is reserved
+					// for Minecraft-style chat / minimap / hotbar cycling.
+					if (seat_in->isKeyDown(KeyType::CAMERA_YAW_LEFT))
+						sv.camera_yaw += key_rate;
+					if (seat_in->isKeyDown(KeyType::CAMERA_YAW_RIGHT))
+						sv.camera_yaw -= key_rate;
+					if (seat_in->isKeyDown(KeyType::CAMERA_PITCH_UP))
+						sv.camera_pitch -= key_rate;
+					if (seat_in->isKeyDown(KeyType::CAMERA_PITCH_DOWN))
+						sv.camera_pitch += key_rate;
 				}
-				// D-pad / keybind-mapped look (works even without an
-				// analog right stick).
-				if (seat_in->isKeyDown(KeyType::CAMERA_YAW_LEFT))
-					sv.camera_yaw += key_rate;
-				if (seat_in->isKeyDown(KeyType::CAMERA_YAW_RIGHT))
-					sv.camera_yaw -= key_rate;
-				if (seat_in->isKeyDown(KeyType::CAMERA_PITCH_UP))
-					sv.camera_pitch -= key_rate;
-				if (seat_in->isKeyDown(KeyType::CAMERA_PITCH_DOWN))
-					sv.camera_pitch += key_rate;
 				sv.camera_pitch = rangelim(sv.camera_pitch, -89, 89);
 
 				client = m_seats[i].client;
 				input = seat_in;
-				updatePlayerControl(sv);
+				if (m_game_formspec.isSeatMenuActive(i))
+					applyIdlePlayerControlForOpenMenu(sv);
+				else
+					updatePlayerControl(sv);
 			}
 			client = saved_client;
 			input = saved_input;
@@ -657,7 +668,48 @@ void Game::run()
 		// Update camera here so it is in-sync with CAO position
 		updateCamera(dtime);
 		updateSound(dtime);
-		processPlayerInteraction(dtime, m_game_ui->m_flags.show_hud);
+		if (!m_game_formspec.isSeatMenuActive(0))
+			processPlayerInteraction(dtime, m_game_ui->m_flags.show_hud);
+		// Split-screen: also let extra seats interact (dig / place / use).
+		// Without this, only seat 0's triggers do anything in the world -
+		// seats 1+ receive their joystick events into per-seat
+		// JoystickControllers, but the function that actually consumes
+		// DIG / PLACE state runs solely against the global `client` /
+		// `camera` / `hud` / `input`. Reuse it by swapping those globals
+		// to each seat in turn (matches the pattern already used for
+		// updatePlayerControl above).
+		//
+		// We std::swap the seat's per-seat runData in too, so each player
+		// gets independent dig progress, their own pointed_old (and
+		// therefore their own selection-box halo), independent
+		// btn_down_for_dig / repeat_place_timer, etc. Without this the
+		// previous seat's "I'm currently digging block A" state would
+		// bleed into the next seat's frame and either interrupt the
+		// digger or leave runData.digging stuck across players.
+		if (m_splitscreen_seats > 1) {
+			InputHandler *saved_input = input;
+			Client *saved_client = client;
+			Camera *saved_camera = camera;
+			Hud *saved_hud = hud;
+			for (u8 i = 1; i < m_splitscreen_seats; i++) {
+				if (!m_seats[i].client || !m_seats[i].camera ||
+						!m_seats[i].hud || !m_seats[i].input)
+					continue;
+				if (m_game_formspec.isSeatMenuActive(i))
+					continue;
+				client = m_seats[i].client;
+				camera = m_seats[i].camera;
+				hud    = m_seats[i].hud;
+				input  = m_seats[i].input.get();
+				std::swap(runData, m_seats[i].run_data);
+				processPlayerInteraction(dtime, false);
+				std::swap(runData, m_seats[i].run_data);
+			}
+			input  = saved_input;
+			client = saved_client;
+			camera = saved_camera;
+			hud    = saved_hud;
+		}
 		updateFrame(&graph, &stats, dtime, cam_view);
 		updateProfilerGraphs(&graph);
 
@@ -1083,9 +1135,17 @@ bool Game::createClient(const GameStartData &start_data)
 				continue;
 			}
 
-			// Bind controller for this seat (MVP: joystick id = i-1).
+			// Bind controller for this seat: seat i uses physical joystick index i
+			// so players 1–4 map to devices 0–3 without overlapping seat 0.
 			if (receiver) {
-				auto seat_input = std::make_unique<GamepadInputHandler>(receiver, (u8)(i - 1));
+				auto seat_input = std::make_unique<GamepadInputHandler>(receiver, i);
+				if (RealInputHandler *primary_in =
+								dynamic_cast<RealInputHandler *>(input)) {
+					// Secondary JoystickControllers skip ClientLauncher::
+					// onJoystickConnect(); without a layout copy they keep an
+					// empty/uninitialized binding map — no buttons or sticks.
+					seat_input->joystick.copyLayoutFrom(primary_in->joystick);
+				}
 				m_seats[i].input = std::move(seat_input);
 			}
 
@@ -1191,7 +1251,23 @@ bool Game::createClient(const GameStartData &start_data)
 			}
 
 			m_seats[i].hud = h;
+
+			// Mirror the GameRunData init that Game::createClient() does
+			// for seat 0 (see `runData = GameRunData(); runData.
+			// time_from_last_punch = 10.0;` near the top of this method).
+			// SeatRuntime::run_data is value-initialised to all zeros at
+			// SeatRuntime construction, but time_from_last_punch must
+			// start at a "long ago" sentinel so the first punch isn't
+			// mis-counted as part of a chain.
+			m_seats[i].run_data = GameRunData();
+			m_seats[i].run_data.time_from_last_punch = 10.0;
 		}
+
+		// Align seat 0 with joystick 0 so it never shares a device with seat 1+
+		// (the `joystick_id` setting may otherwise point seat 0 elsewhere).
+		auto *primary_input = dynamic_cast<RealInputHandler *>(input);
+		if (primary_input)
+			primary_input->joystick.setJoystickId(0);
 	}
 
 	return true;
@@ -1476,13 +1552,24 @@ bool Game::getServerContent(bool *aborted)
 
 inline void Game::updateInteractTimers(f32 dtime)
 {
-	if (runData.nodig_delay_timer >= 0)
-		runData.nodig_delay_timer -= dtime;
+	auto tick = [&](GameRunData &rd) {
+		if (rd.nodig_delay_timer >= 0)
+			rd.nodig_delay_timer -= dtime;
 
-	if (runData.object_hit_delay_timer >= 0)
-		runData.object_hit_delay_timer -= dtime;
+		if (rd.object_hit_delay_timer >= 0)
+			rd.object_hit_delay_timer -= dtime;
 
-	runData.time_from_last_punch += dtime;
+		rd.time_from_last_punch += dtime;
+	};
+
+	tick(runData);
+
+	// Extra seats keep their own GameRunData (swapped into `runData` only
+	// during processPlayerInteraction). Those timers must still advance every
+	// frame or e.g. nodig_delay_timer never reaches 0 and the player cannot
+	// start a second dig after breaking one block.
+	for (u8 i = 1; i < m_splitscreen_seats; i++)
+		tick(m_seats[i].run_data);
 }
 
 
@@ -2475,6 +2562,42 @@ bool Game::getTogglableKeyState(GameKeyType key, bool toggling_enabled, bool pre
 }
 
 
+void Game::applyIdlePlayerControlForOpenMenu(const CameraOrientation &cam)
+{
+	LocalPlayer *player = client->getEnv().getLocalPlayer();
+
+	// In free move (fly), the "toggle_sneak_key" setting would prevent precise
+	// up/down movements. Hence, enable the feature only during 'normal' movement.
+	const bool allow_sneak_toggle = m_cache_toggle_sneak_key &&
+		!(player->getPlayerSettings().free_move && client->checkPrivilege("fly"));
+
+	// Keyboard/mouse do not drive movement here. Joystick analog movement is
+	// encoded separately from key bits (see PlayerControl / setMovementFromKeys);
+	// passing zeros for speed/direction keeps the character still even though
+	// the stick is deflected — needed while a formspec is open because
+	// `InputHandler::clear()` does not zero cached axis values.
+	PlayerControl control(
+			false,
+			false,
+			false,
+			false,
+			false,
+			getTogglableKeyState(KeyType::AUX1, m_cache_toggle_aux1_key,
+					player->control.aux1),
+			getTogglableKeyState(KeyType::SNEAK, allow_sneak_toggle,
+					player->control.sneak),
+			false,
+			false,
+			false,
+			cam.camera_pitch,
+			cam.camera_yaw,
+			0.0f,
+			0.0f);
+	control.setMovementFromKeys();
+	client->setPlayerControl(control);
+}
+
+
 void Game::updatePlayerControl(const CameraOrientation &cam)
 {
 	LocalPlayer *player = client->getEnv().getLocalPlayer();
@@ -2486,13 +2609,16 @@ void Game::updatePlayerControl(const CameraOrientation &cam)
 
 	//TimeTaker tt("update player control", NULL, PRECISION_NANO);
 
+	const bool ctl_forward = isKeyDown(KeyType::FORWARD);
+	const bool ctl_aux1 = getTogglableKeyState(KeyType::AUX1,
+			m_cache_toggle_aux1_key, player->control.aux1);
 	PlayerControl control(
-		isKeyDown(KeyType::FORWARD),
+		ctl_forward,
 		isKeyDown(KeyType::BACKWARD),
 		isKeyDown(KeyType::LEFT),
 		isKeyDown(KeyType::RIGHT),
 		isKeyDown(KeyType::JUMP) || player->getAutojump(),
-		getTogglableKeyState(KeyType::AUX1,  m_cache_toggle_aux1_key, player->control.aux1),
+		ctl_aux1,
 		getTogglableKeyState(KeyType::SNEAK, allow_sneak_toggle,      player->control.sneak),
 		isKeyDown(KeyType::ZOOM),
 		isKeyDown(KeyType::DIG),
@@ -2658,6 +2784,31 @@ void Game::handleClientEvent_PlayerDamage(ClientEvent *event, CameraOrientation 
 		player->hurt_tilt_timer = 1.5f;
 		player->hurt_tilt_strength =
 			rangelim(damage_ratio * 5.0f, 1.0f, 4.0f);
+
+		// Gamepad rumble proportional to damage (Minecraft Bedrock style).
+		// Light damage ⇒ short, light buzz; heavy damage ⇒ longer, heavy
+		// rumble. Skipped when the user has joysticks or rumble disabled.
+		if (m_cache_enable_joysticks
+				&& g_settings->getBool("joystick_rumble_enable")) {
+			const float user_scale = rangelim(
+					g_settings->getFloat("joystick_rumble_strength"),
+					0.0f, 1.0f);
+			if (user_scale > 0.0f) {
+				const float ratio = rangelim(damage_ratio, 0.05f, 1.0f);
+				// Heavy (low-frequency) motor scales hardest with damage;
+				// the high-frequency motor adds a baseline buzz so even
+				// 1-HP nicks feel like something.
+				const u16 low  = (u16)(65535.0f *
+						rangelim(0.45f + 0.55f * ratio, 0.0f, 1.0f) *
+						user_scale);
+				const u16 high = (u16)(65535.0f *
+						rangelim(0.30f + 0.40f * ratio, 0.0f, 1.0f) *
+						user_scale);
+				const u32 duration_ms = (u32)(120.0f + 250.0f * ratio);
+				device->rumbleJoystick(input->joystick.getJoystickId(),
+						low, high, duration_ms);
+			}
+		}
 	}
 
 	// Play damage sound
@@ -3357,12 +3508,6 @@ void Game::processPlayerInteraction(f32 dtime, bool show_hud)
 	// Ensure DIG & PLACE are marked as handled
 	wasKeyDown(KeyType::DIG);
 	wasKeyDown(KeyType::PLACE);
-
-	input->joystick.clearWasKeyPressed(KeyType::DIG);
-	input->joystick.clearWasKeyPressed(KeyType::PLACE);
-
-	input->joystick.clearWasKeyReleased(KeyType::DIG);
-	input->joystick.clearWasKeyReleased(KeyType::PLACE);
 }
 
 
@@ -4422,11 +4567,24 @@ void Game::drawScene(ProfilerGraph *graph, RunStats *stats)
 		constexpr f32 SPLITSCREEN_MAX_FOV_X_DEG = 90.0f;
 		const f32 max_fov_x = SPLITSCREEN_MAX_FOV_X_DEG *
 				(f32)(M_PI / 180.0);
-		if (fov_x > max_fov_x)
+		// Vertical FOV (radians) that yields exactly max_fov_x horizontally
+		// at the full-window aspect — the point where we start clamping.
+		const f32 fov_y_lim = 2.0f * std::atan(
+				std::tan(0.5f * max_fov_x) / win_aspect);
+		const bool horiz_clamped = fov_x > max_fov_x;
+		if (horiz_clamped)
 			fov_x = max_fov_x;
 
-		const f32 fov_y_seat = 2.0f * std::atan(
+		f32 fov_y_seat = 2.0f * std::atan(
 				std::tan(0.5f * fov_x) / vp_aspect);
+
+		// When horiz_clamped, fov_x is pinned to max_fov_x, so any further
+		// increase in the camera's vertical FOV (e.g. MineClone2 sprint's
+		// ~10% widen) is lost and sprint feels like it does nothing in
+		// split-screen. Scale the seat vertical FOV so those changes still
+		// apply relative to the clamp threshold.
+		if (horiz_clamped && fov_y_lim > 0.0001f)
+			fov_y_seat *= fov_y_full / fov_y_lim;
 		cam_node->setAspectRatio(vp_aspect);
 		cam_node->setFOV(fov_y_seat);
 		cam_node->updateMatrices();
