@@ -45,7 +45,12 @@ Camera::Camera(MapDrawControl &draw_control, Client *client, RenderingEngine *re
 	m_camera_mode(CAMERA_MODE_FIRST),
 	m_player_light_color(0xFFFFFFFF)
 {
-	auto smgr = rendering_engine->get_scene_manager();
+	// Use the *client's* scene manager, not the engine's global one.
+	// For seat 0 / regular play these are the same. For split-screen
+	// seats >= 1 the client owns its own per-seat scene manager so the
+	// player/head/camera helper nodes need to live there too, otherwise
+	// the seat's camera ends up parented to a scene it isn't drawing.
+	auto smgr = client->getSceneManager();
 	// note: making the camera node a child of the player node
 	// would lead to unexpected behavior, so we don't do that.
 	m_playernode = smgr->addEmptySceneNode(smgr->getRootSceneNode());
@@ -671,7 +676,7 @@ void Camera::drawNametags()
 	const f32 smoothing_k = 4.0f * BS;
 
 	video::IVideoDriver *driver = RenderingEngine::get_video_driver();
-	v2u32 screensize = driver->getScreenSize();
+	v2u32 screensize = driver->getCurrentRenderTargetSize();
 
 	// Note: hidden nametags (e.g. GenericCAO) are removed from the array
 	for (const Nametag *nametag : m_nametags) {

@@ -78,13 +78,11 @@ ClientLauncher::~ClientLauncher()
 	delete g_gamecallback;
 	g_gamecallback = nullptr;
 
+	guiroot = nullptr;
+	guienv = nullptr;
 	assert(g_menumgr.menuCount() == 0);
 
 	delete m_rendering_engine;
-
-	// CGUIEnvironment causes calls to `deletingMenu`, which needs `guienv != nullptr`.
-	guiroot = nullptr;
-	guienv = nullptr;
 
 	// delete event receiver only after all Irrlicht stuff is gone
 	delete receiver;
@@ -453,6 +451,13 @@ bool ClientLauncher::launch_game(std::string &error_message,
 		menudata.address                         = start_data.address;
 		menudata.name                            = start_data.name;
 		menudata.password                        = start_data.password;
+		menudata.splitscreen_enable              = g_settings->getBool("splitscreen.enable");
+		menudata.splitscreen_seats               = g_settings->exists("splitscreen.seats") ? g_settings->getS32("splitscreen.seats") : 1;
+		menudata.splitscreen_layout              = g_settings->get("splitscreen.layout");
+		menudata.splitscreen_names[0]            = menudata.name;
+		// Note: passwords are runtime-only; do not read from persistent settings.
+		for (int i = 1; i < 4; i++)
+			menudata.splitscreen_names[i] = g_settings->get("splitscreen.name" + itos(i));
 		menudata.port                            = itos(start_data.socket_port);
 		menudata.script_data.errormessage        = std::move(error_message_lua);
 		menudata.script_data.reconnect_requested = reconnect_requested;
@@ -488,6 +493,33 @@ bool ClientLauncher::launch_game(std::string &error_message,
 		start_data.password = menudata.password;
 		start_data.address = std::move(menudata.address);
 		start_data.allow_login_or_register = menudata.allow_login_or_register;
+		// Always re-read split-screen settings from g_settings AFTER the
+		// menu closes. The Lua main menu writes to settings directly when
+		// the user toggles the checkbox / changes the seat count, but
+		// `menudata` was snapshotted from settings BEFORE the menu opened
+		// and only the splitscreen-login dialog (which never opens when
+		// split-screen is disabled) writes back to it via gamedata. Using
+		// the stale `menudata` value here would cause split-screen to
+		// stay enabled across a "disable then Play" sequence.
+		start_data.splitscreen_enable = g_settings->getBool("splitscreen.enable");
+		start_data.splitscreen_seats = rangelim<int>(
+				g_settings->exists("splitscreen.seats") ?
+						g_settings->getS32("splitscreen.seats") : 1,
+				1, 4);
+		start_data.splitscreen_layout = g_settings->get("splitscreen.layout");
+		start_data.splitscreen_names[0] = start_data.name;
+		start_data.splitscreen_passwords[0] = start_data.password;
+		for (int i = 1; i < 4; i++) {
+			// Names persist via settings; passwords are runtime-only and
+			// only valid when the splitscreen-login dialog ran (in which
+			// case menudata holds the freshly typed value).
+			start_data.splitscreen_names[i] = start_data.splitscreen_enable ?
+					menudata.splitscreen_names[i] :
+					std::string();
+			start_data.splitscreen_passwords[i] = start_data.splitscreen_enable ?
+					menudata.splitscreen_passwords[i] :
+					std::string();
+		}
 		server_name = menudata.servername;
 		server_description = menudata.serverdescription;
 
@@ -504,13 +536,40 @@ bool ClientLauncher::launch_game(std::string &error_message,
 		return false;
 	}
 
-	// If using simple singleplayer mode, override
+	// If using simple singleplayer mode, override.
+	// Exception: when split-screen couch co-op is enabled, the
+	// dlg_splitscreen_login dialog lets the user pick a custom name for
+	// Player 1 (seat 0). Honor it instead of forcing "singleplayer", so
+	// couch co-op can have a per-character profile rather than everyone
+	// playing as the shared "singleplayer" account.
 	if (start_data.isSinglePlayer()) {
-		start_data.name = "singleplayer";
+		const bool keep_user_name = start_data.splitscreen_enable
+				&& !start_data.name.empty();
+		if (keep_user_name) {
+			// Persist so the dialog can pre-fill it next launch.
+			g_settings->set("name", start_data.name);
+		} else {
+			start_data.name = "singleplayer";
+		}
 		start_data.password = "";
 		start_data.socket_port = myrand_range(49152, 65535);
 	} else {
 		g_settings->set("name", start_data.name);
+	}
+
+	// Keep seat 0's split-screen entry in sync with the final start_data.name
+	// (it may have been overridden to "singleplayer" just above).
+	start_data.splitscreen_names[0] = start_data.name;
+	start_data.splitscreen_passwords[0] = start_data.password;
+
+	// Persist splitscreen config (names only, not passwords).
+	g_settings->setBool("splitscreen.enable", start_data.splitscreen_enable);
+	g_settings->setS32("splitscreen.seats", start_data.splitscreen_seats);
+	if (!start_data.splitscreen_layout.empty())
+		g_settings->set("splitscreen.layout", start_data.splitscreen_layout);
+	for (int i = 1; i < 4; i++) {
+		if (!start_data.splitscreen_names[i].empty())
+			g_settings->set("splitscreen.name" + itos(i), start_data.splitscreen_names[i]);
 	}
 
 	if (start_data.name.length() > PLAYERNAME_SIZE - 1) {

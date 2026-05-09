@@ -388,6 +388,13 @@ private:
 	u16                        m_formspec_version = 1;
 	std::optional<std::string> m_focused_element = std::nullopt;
 	JoystickController        *m_joystick;
+	bool                       m_gamepad_inv_pointer_init = false;
+	u64                        m_gamepad_cursor_prev_ms = 0;
+
+	void ensureGamepadInventoryPointer();
+	void stepGamepadInventoryCursor();
+	void simulateInventoryMouseClick(bool right_click);
+
 	bool                       m_show_debug = false;
 	bool                       m_show_focus = false;
 	gui::IGUIElement          *m_last_focused = nullptr;

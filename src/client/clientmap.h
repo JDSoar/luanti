@@ -61,7 +61,15 @@ public:
 			Client *client,
 			RenderingEngine *rendering_engine,
 			MapDrawControl &control,
-			s32 id
+			s32 id,
+			// Optional per-seat scene manager (and parent). If both are
+			// nullptr, fall back to the rendering engine's main scene
+			// manager + its root scene node (default for normal play).
+			// For split-screen seats >= 1 the caller passes the seat's
+			// own scene manager so this ClientMap lives in a scene tree
+			// independent from other seats.
+			scene::ISceneManager *scene_manager = nullptr,
+			scene::ISceneNode *parent = nullptr
 	);
 
 	bool maySaveBlocks() override

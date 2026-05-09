@@ -122,7 +122,17 @@ public:
 			MtEventManager *event,
 			RenderingEngine *rendering_engine,
 			ItemVisualsManager *item_visuals,
-			ELoginRegister allow_login_or_register
+			ELoginRegister allow_login_or_register,
+			// Optional per-seat scene manager. Pass nullptr for the
+			// default (use the rendering engine's global scene manager,
+			// shared with the GUI / Sky / clouds / etc.). For split-screen
+			// seats >= 1, callers should pass an independent scene manager
+			// created via smgr->createNewSceneManager(false) so each seat
+			// has a fully isolated 3D scene (no cross-seat CAOs, no
+			// shared visibility flags, etc.). Client takes a reference
+			// (smgr->grab()) and drops it on destruction.
+			scene::ISceneManager *scene_manager = nullptr,
+			s32 client_map_id = 666
 	);
 
 	~Client();
@@ -345,10 +355,57 @@ public:
 	// server hosted by a different Luanti instance.
 	bool m_internal_server;
 
+	/// Mark this client as a secondary split-screen seat that shares the
+	/// engine-wide TextureSource / ShaderSource / NodeDefManager /
+	/// IItemDefManager / sound manager etc. with `primary` (an
+	/// already-fully-loaded Client; pass nullptr only to clear the flag).
+	///
+	/// Once set, content packets that would mutate those shared resources
+	/// (TOCLIENT_NODEDEF, TOCLIENT_ITEMDEF, TOCLIENT_ANNOUNCE_MEDIA,
+	/// TOCLIENT_MEDIA, TOCLIENT_MEDIA_PUSH) become no-ops. The handshake's
+	/// "have we received node defs / item defs / media yet?" flags are
+	/// also short-circuited to true so getServerContent() returns
+	/// immediately for this seat.
+	///
+	/// `primary`'s per-Client model cache (m_mesh_data) is copied into
+	/// this Client because it's NOT a shared resource: skipping the
+	/// media handlers means we never populate it ourselves, and any
+	/// later getMesh() (e.g. GenericCAO::addToScene loading
+	/// "character.b3d" for a remote player) would otherwise fail with
+	/// "Mesh not found".
+	///
+	/// This MUST be set before the seat's first step() is run.
+	///
+	/// Background: without this short-circuit, the secondary seat's
+	/// packet handlers run on the main thread and call
+	/// NodeDefManager::deSerialize() etc. on shared instances while the
+	/// primary seat's MeshUpdateWorkerThread is already iterating those
+	/// same instances on a worker thread. The existing sanity_check in
+	/// handleCommand_NodeDef only checks the *current* Client's mesh
+	/// manager, so it misses the race and we segfault inside
+	/// MapblockMeshGenerator::drawSolidNode dereferencing a freed
+	/// `ContentFeatures::visuals` pointer.
+	void setSharesContentWithPrimary(Client *primary);
+	bool sharesContentWithOtherClient() const
+	{ return m_shares_content_with_other_client; }
+	const StringMap &getMeshData() const { return m_mesh_data; }
+
 	float mediaReceiveProgress();
 
 	void drawLoadScreen(const std::wstring &text, float dtime, int percent);
-	void afterContentReceived();
+	/// Finalises content loading for this Client.
+	///
+	/// `rebuild_shared_assets` controls whether to (re)build engine-wide,
+	/// shared resources -- the TextureSource, ShaderSource, node tile
+	/// assignments, etc. Pass true for the first/primary client (default,
+	/// matches single-player behaviour). Pass false for additional
+	/// split-screen seat clients that share the same TextureSource /
+	/// ShaderSource as the primary: rebuilding from a non-primary seat
+	/// after the primary has already drawn frames invalidates every
+	/// cached MapBlockMesh texture pointer in the primary's ClientMap
+	/// and crashes the next render with "Tried to set a texture not
+	/// owned by this driver" / a segfault inside setMaterial.
+	void afterContentReceived(bool rebuild_shared_assets = true);
 	void showUpdateProgressTexture(void *args, float progress);
 
 	float getRTT();
@@ -363,6 +420,7 @@ public:
 
 	Camera* getCamera () { return m_camera; }
 	scene::ISceneManager *getSceneManager();
+	scene::ISceneNode *getSceneRoot();
 
 	// IGameDef interface
 	bool isClient() override { return true; }
@@ -495,6 +553,15 @@ private:
 	ISoundManager *m_sound;
 	MtEventManager *m_event;
 	RenderingEngine *m_rendering_engine;
+	// Per-seat (or global, for seat 0) Irrlicht scene manager. Owns this
+	// Client's ClientMap, CAOs, Camera helper nodes, etc. For seat 0 in
+	// regular play this is the rendering engine's main scene manager and
+	// is shared with Sky / clouds / GUI. For split-screen seats >= 1 this
+	// is a fresh, independent sub-manager so each seat renders its own
+	// 3D world without interfering with the others.
+	scene::ISceneManager *m_smgr = nullptr;
+	// True if we own a reference to m_smgr that we must drop().
+	bool m_owns_smgr = false;
 	ItemVisualsManager *m_item_visuals_manager;
 
 
@@ -552,6 +619,8 @@ private:
 	bool m_nodedef_received = false;
 	bool m_activeobjects_received = false;
 	bool m_mods_loaded = false;
+	// See setSharesContentWithOtherClient() in the public section.
+	bool m_shares_content_with_other_client = false;
 
 	std::vector<std::string> m_remote_media_servers;
 	// Media downloader, only exists during init

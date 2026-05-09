@@ -7,7 +7,9 @@
 #include "game.h"
 
 #include <AnimatedMeshSceneNode.h>
+#include <array>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 #include "camera.h"
 #include "client.h"
@@ -133,6 +135,9 @@ protected:
 	// Main loop
 
 	void updateInteractTimers(f32 dtime);
+	/// Zeroes movement / dig / place while a seat's GUIFormSpecMenu is open;
+	/// joystick movement uses analog speed which survives `InputHandler::clear()`.
+	void applyIdlePlayerControlForOpenMenu(const CameraOrientation &cam);
 	bool checkConnection();
 	void processQueues();
 	void updateProfilers(const RunStats &stats, const FpsControl &draw_times, f32 dtime);
@@ -144,7 +149,21 @@ protected:
 	void processUserInput(f32 dtime);
 	void processKeyInput();
 	void processItemSelection(u16 *new_playeritem);
+	// Split-screen helpers: drive the per-seat (i > 0) input in the same
+	// way processKeyInput / processItemSelection drive seat 0. Restricted
+	// to the player-facing keys that make sense on a per-seat basis
+	// (inventory, drop, hotbar selection, autoforward toggle, ...) -
+	// global keys such as screenshot or pause stay on seat 0 only.
+	void processKeyInputForSeat(u8 seat_idx);
+	void processItemSelectionForSeat(u8 seat_idx);
 	bool shouldShowTouchControls();
+
+	// Pixel rectangle covering seat `seat_idx`'s on-screen panel for the
+	// active split-screen layout. Returns the full window for seat 0 in
+	// single-player mode. Used both by the renderer (drawScene) and by
+	// menu code that needs to constrain a per-seat formspec to that
+	// seat's panel instead of letting it cover the whole window.
+	core::rect<s32> getSeatViewport(u8 seat_idx) const;
 
 	void dropSelectedItem(bool single_item = false);
 	void openConsole(float scale, const wchar_t *line=NULL);
@@ -242,11 +261,65 @@ protected:
 		return input->wasKeyReleased(k);
 	}
 
+	/// Seat 0 keyboard/mouse should be cleared only when a menu that affects
+	/// or captures the primary player is open — not when another split-screen
+	/// seat alone has a viewport formspec (e.g. death screen).
+	bool primaryLocalInputBlockedByMenus() const;
+
 #ifdef __ANDROID__
 	void handleAndroidChatInput();
 #endif
 
 private:
+	struct SeatRuntime {
+		Client *client = nullptr;
+		Camera *camera = nullptr;
+		Hud *hud = nullptr;
+		scene::ISceneNode *scene_root = nullptr;
+		std::unique_ptr<InputHandler> input; // nullptr for seat0 (uses Game::input)
+		// Off-screen render target this seat draws into when split-screen is
+		// active. Recreated on resize. Owned by the video driver.
+		video::ITexture *render_tex = nullptr;
+		// Per-seat camera orientation. Seat 0 is driven by the mouse /
+		// keyboard via Game::run()'s `cam_view`; seats 1+ are driven by
+		// their gamepad's right stick. Storing it here keeps each seat's
+		// pitch / yaw independent so seat 0 looking around does not also
+		// rotate seat 1's character.
+		CameraOrientation cam_view = {};
+		float update_draw_list_timer = 0.0f;
+		float touch_blocks_timer = 0.0f;
+		v3f update_draw_list_last_cam_dir = v3f(0, 0, 0);
+		bool camera_offset_changed = false;
+		// Whether this seat's wieldnode has been initialized at least once
+		// from its LocalPlayer's actual inventory. Without this priming,
+		// the wield mesh stays as the empty default ItemStack set in the
+		// Camera ctor and the arm/tool never appears in first-person.
+		bool wield_primed = false;
+		// Per-seat hotbar selection state. Seat 0 reuses GameRunData::
+		// new_playeritem (which is wired into a LOT of legacy code paths
+		// that we don't want to touch) so this field is only consulted
+		// for seats 1..N. Initialised lazily from the seat's LocalPlayer
+		// in processItemSelectionForSeat().
+		u16 new_playeritem = 0;
+		bool new_playeritem_initialised = false;
+		// Server-id -> client-id mapping for this seat's HUD elements.
+		// Each seat has its own Client / LocalPlayer and therefore its
+		// own set of HUDs (hearts, hotbar, breath, custom Lua HUDs, ...);
+		// using a single shared map would route every seat's HUD events
+		// to seat 0 and leave the other seats with no HUD at all.
+		std::unordered_map<u32, u32> hud_server_to_client;
+		// Per-seat copy of the run-time interaction state (digging
+		// progress, last pointed thing, place-repeat timer, etc.). The
+		// global Game::runData is owned by seat 0; whenever we dispatch
+		// processPlayerInteraction() to this seat we std::swap it with
+		// `runData` so each player has independent dig progress, their
+		// own selection-box halo, and so simultaneous mining by two
+		// seats does not have one player's "btn_down_for_dig" bleed
+		// into the other's frame. Initialised in createClient() to
+		// match what Game::createClient() does for seat 0's runData.
+		GameRunData run_data{};
+	};
+
 	struct Flags {
 		bool disable_camera_update = false;
 		/// 0 = no debug text active, see toggleDebug() for the rest
@@ -292,6 +365,10 @@ private:
 	Client *client = nullptr;
 	Server *server = nullptr;
 
+	// Split-screen runtime. Seat 0 uses the legacy single-player members above.
+	u8 m_splitscreen_seats = 1;
+	std::array<SeatRuntime, 4> m_seats{};
+
 	ClientDynamicInfo client_display_info{};
 	float dynamic_info_send_timer = 0;
 
@@ -322,8 +399,12 @@ private:
 	Minimap *mapper = nullptr;
 	GameFormSpec m_game_formspec;
 
-	// Map server hud ids to client hud ids
-	std::unordered_map<u32, u32> m_hud_server_to_client;
+	// Index of the seat whose ClientEvent queue is currently being drained
+	// inside processClientEvents(). Per-seat handlers (HudAdd / HudRemove
+	// / HudChange, ...) consult this to find the right SeatRuntime so that
+	// each seat ends up with its own HUD elements instead of seat 0
+	// receiving everyone's.
+	u8 m_current_event_seat = 0;
 
 	GameRunData runData;
 	Flags m_flags;

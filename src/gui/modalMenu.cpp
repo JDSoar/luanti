@@ -69,13 +69,52 @@ void GUIModalMenu::draw()
 		return;
 
 	video::IVideoDriver *driver = Environment->getVideoDriver();
-	v2u32 screensize = driver->getScreenSize();
-	if (screensize != m_screensize_old) {
+
+	// Compute the "screen size" we should regenerate the GUI for, plus
+	// the absolute origin we should anchor the menu to. Without a
+	// viewport set, this is just the full window (legacy behavior).
+	// With a viewport set (see setViewport()), the menu is laid out as
+	// if the viewport's size were the whole screen, then translated to
+	// land inside the viewport -- this is how split-screen seats can
+	// each show their own inventory inside their own panel.
+	const bool use_viewport =
+			m_viewport.getWidth() > 0 && m_viewport.getHeight() > 0;
+	v2u32 screensize;
+	if (use_viewport)
+		screensize = v2u32((u32)m_viewport.getWidth(),
+				(u32)m_viewport.getHeight());
+	else
+		screensize = driver->getScreenSize();
+	v2s32 origin = use_viewport ? m_viewport.UpperLeftCorner : v2s32(0, 0);
+
+	if (screensize != m_screensize_old || origin != m_viewport_origin_old) {
 		m_screensize_old = screensize;
 		regenerateGui(screensize);
+
+		if (origin.X != 0 || origin.Y != 0) {
+			// regenerateGui() laid the menu out for an origin of (0,0)
+			// using `screensize` as the screen. Translate the menu (and
+			// recursively its children) to land at the viewport origin
+			// in real screen coordinates.
+			DesiredRect += origin;
+			RelativeRect += origin;
+			recalculateAbsolutePosition(true);
+		}
+		m_viewport_origin_old = origin;
 	}
 
 	drawMenu();
+}
+
+void GUIModalMenu::setViewport(const core::rect<s32> &vp)
+{
+	if (vp == m_viewport)
+		return;
+	m_viewport = vp;
+	// Force the next draw() to regenerate / re-translate the menu so the
+	// new viewport size and origin take effect.
+	m_screensize_old = v2u32(0, 0);
+	m_viewport_origin_old = v2s32(0, 0);
 }
 
 /*

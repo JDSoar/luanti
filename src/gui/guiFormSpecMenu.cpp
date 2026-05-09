@@ -3047,6 +3047,8 @@ void GUIFormSpecMenu::regenerateGui(v2u32 screensize)
 	m_tooltips.clear();
 	m_tooltip_rects.clear();
 	m_inventory_rings.clear();
+	m_gamepad_inv_pointer_init = false;
+	m_gamepad_cursor_prev_ms = 0;
 	m_dropdowns.clear();
 	m_scroll_containers.clear();
 	theme_by_name.clear();
@@ -3160,7 +3162,12 @@ void GUIFormSpecMenu::regenerateGui(v2u32 screensize)
 	if (mydata.explicit_size) {
 		// compute scaling for specified form size
 		if (m_lock) {
-			v2u32 current_screensize = RenderingEngine::get_video_driver()->getScreenSize();
+			// Use the layout size already chosen for this menu (full window, or
+			// the split-screen viewport from GUIModalMenu::setViewport()), not the
+			// raw driver size. Centering a locked `size[,,true]` form against the
+			// physical monitor would push the whole dialog across split boundaries
+			// (e.g. builtin death screen) even when bgcolor respects the viewport.
+			v2u32 current_screensize = mydata.screensize;
 			v2u32 delta = current_screensize - m_lockscreensize;
 
 			if (current_screensize.Y > m_lockscreensize.Y)
@@ -3503,6 +3510,8 @@ void GUIFormSpecMenu::drawMenu()
 
 	updateSelectedItem();
 
+	stepGamepadInventoryCursor();
+
 	// Auto-scroll to center focused element when Tab enables focus tracking
 	autoScroll();
 
@@ -3512,7 +3521,13 @@ void GUIFormSpecMenu::drawMenu()
 		Draw background color
 	*/
 	v2u32 screenSize = driver->getScreenSize();
-	core::rect<s32> allbg(0, 0, screenSize.X, screenSize.Y);
+	// Split-screen: the "fullscreen" dim background must stop at the
+	// menu's viewport, otherwise opening seat 0's inventory paints the
+	// dim quad over every other player's panel too.
+	const core::rect<s32> &vp = getViewport();
+	core::rect<s32> allbg = (vp.getWidth() > 0 && vp.getHeight() > 0)
+		? vp
+		: core::rect<s32>(0, 0, screenSize.X, screenSize.Y);
 
 	if (m_bgfullscreen)
 		driver->draw2DRectangle(m_fullscreen_bgcolor, allbg, &allbg);
@@ -3684,13 +3699,28 @@ void GUIFormSpecMenu::showTooltip(const std::wstring &text,
 	s32 tooltip_height = m_tooltip_element->getTextHeight() + 5;
 
 	v2u32 screenSize = Environment->getVideoDriver()->getScreenSize();
+	// Split-screen: clamp the tooltip to this menu's viewport rect
+	// instead of the full window. Without this, hovering an item slot
+	// near the right edge of seat 1's panel would let the tooltip slide
+	// into seat 2's panel - and the "alt" clamps below would happily
+	// shove it deeper into the neighbour. We mirror the corner the
+	// tooltip would have been clamped to in single-screen mode but
+	// using the viewport's max_x / max_y / min_x / min_y.
+	const core::rect<s32> &vp = getViewport();
+	const bool has_viewport = vp.getWidth() > 0 && vp.getHeight() > 0;
+	const s32 vp_min_x = has_viewport ? vp.UpperLeftCorner.X : 0;
+	const s32 vp_min_y = has_viewport ? vp.UpperLeftCorner.Y : 0;
+	const s32 vp_max_x = has_viewport ? vp.LowerRightCorner.X : (s32)screenSize.X;
+	const s32 vp_max_y = has_viewport ? vp.LowerRightCorner.Y : (s32)screenSize.Y;
+
 	int tooltip_offset_x = m_btn_height;
 	int tooltip_offset_y = m_btn_height;
 
 	if (RenderingEngine::getLastPointerType() == PointerType::Touch) {
 		tooltip_offset_x *= 3;
 		tooltip_offset_y  = 0;
-		if (m_pointer.X > (s32)screenSize.X / 2)
+		const s32 vp_mid_x = vp_min_x + (vp_max_x - vp_min_x) / 2;
+		if (m_pointer.X > vp_mid_x)
 			tooltip_offset_x = -(tooltip_offset_x + tooltip_width);
 	}
 
@@ -3698,8 +3728,8 @@ void GUIFormSpecMenu::showTooltip(const std::wstring &text,
 	s32 tooltip_x = m_pointer.X + tooltip_offset_x;
 	s32 tooltip_y = m_pointer.Y + tooltip_offset_y;
 	// Bottom/Left limited positions (if the tooltip is too far out)
-	s32 tooltip_x_alt = (s32)screenSize.X - tooltip_width  - m_btn_height;
-	s32 tooltip_y_alt = (s32)screenSize.Y - tooltip_height - m_btn_height;
+	s32 tooltip_x_alt = vp_max_x - tooltip_width  - m_btn_height;
+	s32 tooltip_y_alt = vp_max_y - tooltip_height - m_btn_height;
 
 	int collision = (tooltip_x_alt < tooltip_x) + 2 * (tooltip_y_alt < tooltip_y);
 	switch (collision) {
@@ -3711,11 +3741,19 @@ void GUIFormSpecMenu::showTooltip(const std::wstring &text,
 		break;
 	case 3: // both
 		tooltip_x = tooltip_x_alt;
-		tooltip_y = (s32)screenSize.Y - 2 * tooltip_height - m_btn_height;
+		tooltip_y = vp_max_y - 2 * tooltip_height - m_btn_height;
 		break;
 	default: // OK
 		break;
 	}
+
+	// Final clamp into the viewport: prevents the tooltip from spilling
+	// off the left/top edge of this seat's panel even after the alt
+	// corrections above.
+	if (tooltip_x < vp_min_x)
+		tooltip_x = vp_min_x;
+	if (tooltip_y < vp_min_y)
+		tooltip_y = vp_min_y;
 
 	m_tooltip_element->setRelativePosition(
 		core::rect<s32>(
@@ -4077,6 +4115,157 @@ bool GUIFormSpecMenu::remapClickOutside(const SEvent &event)
 	return GUIModalMenu::remapClickOutside(event);
 }
 
+void GUIFormSpecMenu::ensureGamepadInventoryPointer()
+{
+	const core::rect<s32> clip = getAbsoluteClippingRect();
+
+	auto clamp_point = [&clip](v2s32 p) -> v2s32 {
+		const s32 max_x = std::max(clip.UpperLeftCorner.X + 1,
+				clip.LowerRightCorner.X - 2);
+		const s32 max_y = std::max(clip.UpperLeftCorner.Y + 1,
+				clip.LowerRightCorner.Y - 2);
+		p.X = rangelim(p.X, clip.UpperLeftCorner.X + 1, max_x);
+		p.Y = rangelim(p.Y, clip.UpperLeftCorner.Y + 1, max_y);
+		return p;
+	};
+
+	for (GUIInventoryList *ilist : m_inventorylists) {
+		if (!ilist || !ilist->isVisible())
+			continue;
+
+		const v2s32 slot = ilist->getSlotSize();
+		v2s32 center = ilist->getAbsolutePosition().UpperLeftCorner;
+		center.X += slot.X / 2;
+		center.Y += slot.Y / 2;
+		m_pointer = clamp_point(center);
+		m_old_pointer = m_pointer;
+		return;
+	}
+
+	const core::rect<s32> &vp = getViewport();
+	if (vp.getWidth() > 0 && vp.getHeight() > 0)
+		m_pointer = clamp_point(vp.getCenter());
+	else
+		m_pointer = clamp_point(clip.getCenter());
+	m_old_pointer = m_pointer;
+}
+
+void GUIFormSpecMenu::stepGamepadInventoryCursor()
+{
+	if (!m_joystick)
+		return;
+
+	const u64 now_ms = porting::getTimeMs();
+	if (m_gamepad_cursor_prev_ms == 0)
+		m_gamepad_cursor_prev_ms = now_ms;
+	float dt = (now_ms - m_gamepad_cursor_prev_ms) / 1000.f;
+	m_gamepad_cursor_prev_ms = now_ms;
+	dt = MYMIN(dt, 0.08f);
+
+	if (!m_gamepad_inv_pointer_init) {
+		ensureGamepadInventoryPointer();
+		m_gamepad_inv_pointer_init = true;
+		// On the very first frame, snap the OS cursor to where we placed
+		// the formspec pointer so the user immediately sees their starting
+		// position (otherwise the visible cursor lingers wherever the
+		// mouse was last left).
+		if (gui::ICursorControl *cc =
+				RenderingEngine::get_raw_device()->getCursorControl())
+			cc->setPosition(m_pointer.X, m_pointer.Y);
+	}
+
+	static constexpr float CURSOR_SPEED = 1400.f;
+	static constexpr float DPAD_CURSOR_SPEED = 1280.f;
+	float ax = m_joystick->getAxisWithoutDead(JA_FRUSTUM_HORIZONTAL);
+	float ay = m_joystick->getAxisWithoutDead(JA_FRUSTUM_VERTICAL);
+	// Allow the left stick to drive the cursor too (some users prefer it,
+	// and it keeps menus reachable on pads where one stick is broken).
+	ax += m_joystick->getAxisWithoutDead(JA_SIDEWARD_MOVE) * 0.45f;
+	ay += m_joystick->getAxisWithoutDead(JA_FORWARD_MOVE) * 0.45f;
+
+	// D-pad as discrete cursor steps (Minecraft-style inventory navigation).
+	// The Xbox D-pad now sets HOTBAR_PREV/HOTBAR_NEXT (left/right) and
+	// MINIMAP/CHAT (up/down) to mirror Minecraft Bedrock's controller scheme;
+	// see create_xbox_layout / handleEvent in joystick_controller.cpp.
+	// Those in-game actions do not fire while a menu is open (in-game input
+	// processing is bypassed by isMenuActive() in inputhandler.cpp), so it is
+	// safe to reuse them here purely as directional menu signals.
+	float dpx = 0.f, dpy = 0.f;
+	if (m_joystick->isKeyDown(KeyType::HOTBAR_PREV))
+		dpx -= 1.f;
+	if (m_joystick->isKeyDown(KeyType::HOTBAR_NEXT))
+		dpx += 1.f;
+	if (m_joystick->isKeyDown(KeyType::MINIMAP))
+		dpy -= 1.f;
+	if (m_joystick->isKeyDown(KeyType::CHAT))
+		dpy += 1.f;
+
+	if (dpx != 0.f || dpy != 0.f) {
+		ax += dpx * (DPAD_CURSOR_SPEED / CURSOR_SPEED);
+		ay += dpy * (DPAD_CURSOR_SPEED / CURSOR_SPEED);
+	}
+
+	if (ax != 0.f || ay != 0.f) {
+		m_pointer.X += (s32)(ax * CURSOR_SPEED * dt);
+		m_pointer.Y += (s32)(ay * CURSOR_SPEED * dt);
+
+		// Without an inventory list the formspec's clipping rect is fine
+		// to clamp against (e.g. pause menu). With one we still want to
+		// stay inside the menu so the slot hover detection works.
+		const core::rect<s32> clip = getAbsoluteClippingRect();
+		const s32 max_x = std::max(clip.UpperLeftCorner.X + 1,
+				clip.LowerRightCorner.X - 2);
+		const s32 max_y = std::max(clip.UpperLeftCorner.Y + 1,
+				clip.LowerRightCorner.Y - 2);
+		m_pointer.X = rangelim(m_pointer.X, clip.UpperLeftCorner.X + 1, max_x);
+		m_pointer.Y = rangelim(m_pointer.Y, clip.UpperLeftCorner.Y + 1, max_y);
+
+		// Drive the OS cursor along with the formspec pointer so the user
+		// can actually see what they're aiming at - otherwise only the
+		// invisible m_pointer moves and the visible cursor sits still.
+		if (gui::ICursorControl *cc =
+				RenderingEngine::get_raw_device()->getCursorControl())
+			cc->setPosition(m_pointer.X, m_pointer.Y);
+
+		SEvent move{};
+		move.EventType = EET_MOUSE_INPUT_EVENT;
+		move.MouseInput.Event = EMIE_MOUSE_MOVED;
+		move.MouseInput.X = m_pointer.X;
+		move.MouseInput.Y = m_pointer.Y;
+		move.MouseInput.ButtonStates = 0;
+		move.MouseInput.Simulated = true;
+		if (!preprocessEvent(move))
+			OnEvent(move);
+	}
+}
+
+void GUIFormSpecMenu::simulateInventoryMouseClick(bool right_click)
+{
+	irr_ptr<GUIModalMenu> holder;
+	holder.grab(this);
+
+	auto inject = [&](EMOUSE_INPUT_EVENT ev, u32 button_states) {
+		SEvent me{};
+		me.EventType = EET_MOUSE_INPUT_EVENT;
+		me.MouseInput.Event = ev;
+		me.MouseInput.X = m_pointer.X;
+		me.MouseInput.Y = m_pointer.Y;
+		me.MouseInput.ButtonStates = button_states;
+		me.MouseInput.Simulated = true;
+		if (!preprocessEvent(me))
+			OnEvent(me);
+	};
+
+	if (!right_click) {
+		inject(EMIE_LMOUSE_PRESSED_DOWN, SDL_BUTTON_MASK(SDL_BUTTON_LEFT));
+		inject(EMIE_LMOUSE_LEFT_UP, 0);
+	} else {
+		inject(EMIE_RMOUSE_PRESSED_DOWN, SDL_BUTTON_MASK(SDL_BUTTON_RIGHT));
+		inject(EMIE_RMOUSE_LEFT_UP, 0);
+	}
+	updateSelectedItem();
+}
+
 bool GUIFormSpecMenu::preprocessEvent(const SEvent& event)
 {
 	// This must be done first so that GUIModalMenu can set m_pointer_type
@@ -4180,14 +4369,40 @@ bool GUIFormSpecMenu::preprocessEvent(const SEvent& event)
 			return false;
 
 		bool handled = m_joystick->handleEvent(event.JoystickEvent);
-		if (handled) {
-			if (m_joystick->wasKeyDown(KeyType::ESC)) {
-				tryClose();
-			} else if (m_joystick->wasKeyDown(KeyType::JUMP)) {
-				trySubmitClose();
-			}
+		if (!handled)
+			return false;
+
+		// Start (ESC) closes any formspec.
+		if (m_joystick->wasKeyDown(KeyType::ESC)) {
+			tryClose();
+			return true;
 		}
-		return handled;
+
+		// Y (INVENTORY) toggles the inventory closed - and is also the
+		// natural "back / cancel" for any other gamepad-driven menu.
+		if (m_joystick->wasKeyDown(KeyType::INVENTORY)) {
+			tryClose();
+			return true;
+		}
+
+		// A (JUMP) and RT (DIG) act as a primary click on whatever the
+		// gamepad cursor is currently over. This works the same way for
+		// inventory slots (pick up / drop a stack) and for plain formspec
+		// buttons (Continue / Settings / Exit on the pause menu, the
+		// items inside the chest UI, etc.). LT (PLACE) is a secondary
+		// click - "drop one" in inventories, generally a no-op on a
+		// regular button but harmless to forward.
+		if (m_joystick->wasKeyDown(KeyType::DIG) ||
+				m_joystick->wasKeyDown(KeyType::JUMP)) {
+			simulateInventoryMouseClick(false);
+			return true;
+		}
+		if (m_joystick->wasKeyDown(KeyType::PLACE)) {
+			simulateInventoryMouseClick(true);
+			return true;
+		}
+
+		return true;
 	}
 
 	return false;

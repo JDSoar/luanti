@@ -19,6 +19,7 @@
 #include "gui/guiPasswordChange.h"
 #include "gui/guiOpenURL.h"
 #include "gui/guiVolumeChange.h"
+#include "joystick_controller.h"
 #include "localplayer.h"
 
 /*
@@ -204,37 +205,66 @@ void GameFormSpec::init(Client *client, RenderingEngine *rendering_engine, Input
 	*g_gamecallback = MainGameCallback();
 }
 
-void GameFormSpec::deleteFormspec()
+void GameFormSpec::deleteFormspec(u8 seat_idx)
 {
-	if (m_formspec) {
-		m_formspec->drop();
-		m_formspec = nullptr;
+	if (seat_idx >= m_seat_formspec.size())
+		return;
+	if (m_seat_formspec[seat_idx]) {
+		m_seat_formspec[seat_idx]->drop();
+		m_seat_formspec[seat_idx] = nullptr;
 	}
+}
+
+bool GameFormSpec::isSeatMenuActive(u8 seat_idx) const
+{
+	if (seat_idx >= m_seat_formspec.size())
+		return false;
+	GUIFormSpecMenu *fs = m_seat_formspec[seat_idx];
+	// refcount > 1 means the menu is still parented to guiroot. Mirror
+	// the bookkeeping logic from update() so the seat-key handler sees
+	// the same "menu open" answer the user sees on screen.
+	return fs && fs->getReferenceCount() > 1;
 }
 
 void GameFormSpec::reset()
 {
-	if (m_formspec)
-		m_formspec->quitMenu();
-	deleteFormspec();
+	for (u8 i = 0; i < m_seat_formspec.size(); i++) {
+		if (m_seat_formspec[i])
+			m_seat_formspec[i]->quitMenu();
+		deleteFormspec(i);
+	}
 }
 
-bool GameFormSpec::handleEmptyFormspec(const std::string &formspec, const std::string &formname)
+bool GameFormSpec::handleEmptyFormspec(u8 seat_idx, const std::string &formspec,
+		const std::string &formname)
 {
-	if (formspec.empty()) {
-		GUIModalMenu *menu = g_menumgr.tryGetTopMenu();
-		if (menu && (formname.empty() || formname == menu->getName())) {
-			// `m_formspec` will be fixed up in `GameFormSpec::update()`
-			menu->quitMenu();
-		}
+	if (!formspec.empty())
+		return false;
+
+	// Prefer closing the seat's own slot when it's the one being targeted
+	// (server-side `show_formspec("", "")` for a non-zero seat). For seat
+	// 0 we fall back to the legacy behaviour of closing whatever is on
+	// top of the menu manager so callers like the in-game settings UI
+	// keep working unchanged.
+	GUIFormSpecMenu *seat_fs = (seat_idx < m_seat_formspec.size())
+			? m_seat_formspec[seat_idx] : nullptr;
+	if (seat_idx > 0 && seat_fs) {
+		if (formname.empty() || formname == seat_fs->getName())
+			seat_fs->quitMenu();
 		return true;
 	}
-	return false;
+
+	GUIModalMenu *menu = g_menumgr.tryGetTopMenu();
+	if (menu && (formname.empty() || formname == menu->getName())) {
+		// the matching slot will be fixed up in `GameFormSpec::update()`
+		menu->quitMenu();
+	}
+	return true;
 }
 
 void GameFormSpec::showFormSpec(const std::string &formspec, const std::string &formname)
 {
-	if (handleEmptyFormspec(formspec, formname))
+	if (handleEmptyFormspec(0, formspec, formname))
 		return;
 
 	FormspecFormSource *fs_src =
@@ -243,25 +273,84 @@ void GameFormSpec::showFormSpec(const std::string &formspec, const std::string &
 		new TextDestPlayerInventory(m_client, formname);
 
 	// Replace the currently open formspec
-	GUIFormSpecMenu::create(m_formspec, m_client, m_rendering_engine->get_gui_env(),
+	GUIFormSpecMenu::create(m_seat_formspec[0], m_client,
+		m_rendering_engine->get_gui_env(),
 		&m_input->joystick, fs_src, txt_dst, m_client->getFormspecPrepend(),
 		m_client->getSoundManager());
-	m_formspec->setName(formname);
+	m_seat_formspec[0]->setName(formname);
+}
+
+void GameFormSpec::showFormSpecForSeat(u8 seat_idx, Client *seat_client,
+	JoystickController *seat_joystick,
+	const core::rect<s32> &seat_viewport,
+	const std::string &formspec, const std::string &formname)
+{
+	if (seat_idx >= m_seat_formspec.size())
+		return;
+
+	Client *c = seat_client ? seat_client : m_client;
+	JoystickController *jc = seat_joystick ? seat_joystick : &m_input->joystick;
+
+	if (handleEmptyFormspec(seat_idx, formspec, formname))
+		return;
+
+	FormspecFormSource *fs_src = new FormspecFormSource(formspec);
+	TextDestPlayerInventory *txt_dst =
+		new TextDestPlayerInventory(c, formname);
+
+	GUIFormSpecMenu::create(m_seat_formspec[seat_idx], c,
+		m_rendering_engine->get_gui_env(),
+		jc, fs_src, txt_dst, c->getFormspecPrepend(),
+		c->getSoundManager());
+	// Same viewport story as showPlayerInventory: constrain the formspec
+	// to this seat's panel so it doesn't paint over its split-screen
+	// neighbours.
+	if (seat_viewport.getWidth() > 0 && seat_viewport.getHeight() > 0)
+		m_seat_formspec[seat_idx]->setViewport(seat_viewport);
+	m_seat_formspec[seat_idx]->setName(formname);
 }
 
 void GameFormSpec::showCSMFormSpec(const std::string &formspec, const std::string &formname)
 {
-	if (handleEmptyFormspec(formspec, formname))
+	if (handleEmptyFormspec(0, formspec, formname))
 		return;
 
 	FormspecFormSource *fs_src = new FormspecFormSource(formspec);
 	LocalScriptingFormspecHandler *txt_dst =
 		new LocalScriptingFormspecHandler(formname, m_client->getScript());
 
-	GUIFormSpecMenu::create(m_formspec, m_client, m_rendering_engine->get_gui_env(),
+	GUIFormSpecMenu::create(m_seat_formspec[0], m_client,
+			m_rendering_engine->get_gui_env(),
 			&m_input->joystick, fs_src, txt_dst, m_client->getFormspecPrepend(),
 			m_client->getSoundManager());
-	m_formspec->setName(formname);
+	m_seat_formspec[0]->setName(formname);
+}
+
+void GameFormSpec::showCSMFormSpecForSeat(u8 seat_idx, Client *seat_client,
+	JoystickController *seat_joystick,
+	const core::rect<s32> &seat_viewport,
+	const std::string &formspec, const std::string &formname)
+{
+	if (seat_idx >= m_seat_formspec.size())
+		return;
+
+	Client *c = seat_client ? seat_client : m_client;
+	JoystickController *jc = seat_joystick ? seat_joystick : &m_input->joystick;
+
+	if (handleEmptyFormspec(seat_idx, formspec, formname))
+		return;
+
+	FormspecFormSource *fs_src = new FormspecFormSource(formspec);
+	LocalScriptingFormspecHandler *txt_dst =
+		new LocalScriptingFormspecHandler(formname, c->getScript());
+
+	GUIFormSpecMenu::create(m_seat_formspec[seat_idx], c,
+			m_rendering_engine->get_gui_env(),
+			jc, fs_src, txt_dst, c->getFormspecPrepend(),
+			c->getSoundManager());
+	if (seat_viewport.getWidth() > 0 && seat_viewport.getHeight() > 0)
+		m_seat_formspec[seat_idx]->setViewport(seat_viewport);
+	m_seat_formspec[seat_idx]->setName(formname);
 }
 
 void GameFormSpec::showPauseMenuFormSpec(const std::string &formspec, const std::string &formname)
@@ -272,7 +361,7 @@ void GameFormSpec::showPauseMenuFormSpec(const std::string &formspec, const std:
 
 	// If we send updated formspec contents, we can either (1) recycle the old
 	// GUIFormSpecMenu or (2) close the old and open a new one. This is option 2.
-	(void)handleEmptyFormspec("", formname);
+	(void)handleEmptyFormspec(0, "", formname);
 	if (formspec.empty())
 		return;
 
@@ -302,27 +391,41 @@ void GameFormSpec::showNodeFormspec(const std::string &formspec, const v3s16 &no
 		&m_client->getEnv().getClientMap(), nodepos);
 	TextDest *txt_dst = new TextDestNodeMetadata(nodepos, m_client);
 
-	GUIFormSpecMenu::create(m_formspec, m_client, m_rendering_engine->get_gui_env(),
+	GUIFormSpecMenu::create(m_seat_formspec[0], m_client,
+		m_rendering_engine->get_gui_env(),
 		&m_input->joystick, fs_src, txt_dst, m_client->getFormspecPrepend(),
 		m_client->getSoundManager());
 
-	m_formspec->setFormSpec(formspec, inventoryloc);
+	m_seat_formspec[0]->setFormSpec(formspec, inventoryloc);
 }
 
-void GameFormSpec::showPlayerInventory(const std::string *fs_override)
+void GameFormSpec::showPlayerInventory(const std::string *fs_override,
+	u8 seat_idx,
+	Client *seat_client, JoystickController *seat_joystick,
+	const core::rect<s32> &seat_viewport)
 {
+	if (seat_idx >= m_seat_formspec.size())
+		return;
+
+	// Split-screen: route the inventory to the requesting seat. When called
+	// from the primary key handler (or from a Lua callback that doesn't know
+	// about seats) we fall back to the engine's main client / joystick so
+	// behaviour for single-player is byte-identical to before.
+	Client *c = seat_client ? seat_client : m_client;
+	JoystickController *jc = seat_joystick ? seat_joystick : &m_input->joystick;
+
 	/*
 	 * Don't permit to open inventory is CAO or player doesn't exists.
 	 * This prevent showing an empty inventory at player load
 	 */
 
-	LocalPlayer *player = m_client->getEnv().getLocalPlayer();
+	LocalPlayer *player = c->getEnv().getLocalPlayer();
 	if (!player || !player->getCAO())
 		return;
 
 	infostream << "Game: Launching inventory" << std::endl;
 
-	auto fs_src = std::make_unique<PlayerInventoryFormSource>(m_client);
+	auto fs_src = std::make_unique<PlayerInventoryFormSource>(c);
 
 	InventoryLocation inventoryloc;
 	inventoryloc.setCurrentPlayer();
@@ -336,20 +439,27 @@ void GameFormSpec::showPlayerInventory(const std::string *fs_override)
 	}
 
 	// If prevented by Client-Side Mods
-	if (m_client->modsLoaded() && m_client->getScript()->on_inventory_open(m_client->getInventory(inventoryloc)))
+	if (c->modsLoaded() && c->getScript()->on_inventory_open(c->getInventory(inventoryloc)))
 		return;
 
 	// Empty formspec -> do not show.
 	if (fs_src->getForm().empty())
 		return;
 
-	TextDest *txt_dst = new TextDestPlayerInventory(m_client);
+	TextDest *txt_dst = new TextDestPlayerInventory(c);
 
-	GUIFormSpecMenu::create(m_formspec, m_client, m_rendering_engine->get_gui_env(),
-		&m_input->joystick, fs_src.get(), txt_dst, m_client->getFormspecPrepend(),
-		m_client->getSoundManager());
+	GUIFormSpecMenu::create(m_seat_formspec[seat_idx], c,
+		m_rendering_engine->get_gui_env(),
+		jc, fs_src.get(), txt_dst, c->getFormspecPrepend(),
+		c->getSoundManager());
 
-	m_formspec->setFormSpec(fs_src->getForm(), inventoryloc);
+	// Constrain the formspec to the requesting seat's panel when called
+	// from a split-screen seat. Without this the menu would lay itself
+	// out for the full window and paint on top of every player's view.
+	if (seat_viewport.getWidth() > 0 && seat_viewport.getHeight() > 0)
+		m_seat_formspec[seat_idx]->setViewport(seat_viewport);
+
+	m_seat_formspec[seat_idx]->setFormSpec(fs_src->getForm(), inventoryloc);
 	fs_src.release(); // owned by GUIFormSpecMenu
 }
 
@@ -459,16 +569,25 @@ void GameFormSpec::showPauseMenu()
 	FormspecFormSource *fs_src = new FormspecFormSource(os.str());
 	HardcodedPauseFormspecHandler *txt_dst = new HardcodedPauseFormspecHandler();
 
-	GUIFormSpecMenu::create(m_formspec, m_client, m_rendering_engine->get_gui_env(),
+	GUIFormSpecMenu::create(m_seat_formspec[0], m_client,
+			m_rendering_engine->get_gui_env(),
 			&m_input->joystick, fs_src, txt_dst, m_client->getFormspecPrepend(),
 			m_client->getSoundManager());
-	m_formspec->setFocus("btn_continue");
+	m_seat_formspec[0]->setFocus("btn_continue");
 	// game will be paused in next step, if in singleplayer (see Game::m_is_paused)
-	m_formspec->doPause = true;
+	m_seat_formspec[0]->doPause = true;
 }
 
-void GameFormSpec::showDeathFormspecLegacy()
+void GameFormSpec::showDeathFormspecLegacy(u8 seat_idx, Client *seat_client,
+	JoystickController *seat_joystick,
+	const core::rect<s32> &seat_viewport)
 {
+	if (seat_idx >= m_seat_formspec.size())
+		return;
+
+	Client *c = seat_client ? seat_client : m_client;
+	JoystickController *jc = seat_joystick ? seat_joystick : &m_input->joystick;
+
 	static std::string formspec_str =
 		std::string("formspec_version[1]") +
 		SIZE_TAG
@@ -481,12 +600,15 @@ void GameFormSpec::showDeathFormspecLegacy()
 	/* Note: FormspecFormSource and LocalFormspecHandler  *
 	 * are deleted by guiFormSpecMenu                     */
 	FormspecFormSource *fs_src = new FormspecFormSource(formspec_str);
-	LegacyDeathFormspecHandler *txt_dst = new LegacyDeathFormspecHandler(m_client);
+	LegacyDeathFormspecHandler *txt_dst = new LegacyDeathFormspecHandler(c);
 
-	GUIFormSpecMenu::create(m_formspec, m_client, m_rendering_engine->get_gui_env(),
-		&m_input->joystick, fs_src, txt_dst, m_client->getFormspecPrepend(),
-		m_client->getSoundManager());
-	m_formspec->setFocus("btn_respawn");
+	GUIFormSpecMenu::create(m_seat_formspec[seat_idx], c,
+		m_rendering_engine->get_gui_env(),
+		jc, fs_src, txt_dst, c->getFormspecPrepend(),
+		c->getSoundManager());
+	if (seat_viewport.getWidth() > 0 && seat_viewport.getHeight() > 0)
+		m_seat_formspec[seat_idx]->setViewport(seat_viewport);
+	m_seat_formspec[seat_idx]->setFocus("btn_respawn");
 }
 
 void GameFormSpec::update()
@@ -495,33 +617,42 @@ void GameFormSpec::update()
 	   make sure menu is on top
 	   1. Delete formspec menu reference if menu was removed
 	   2. Else, make sure formspec menu is on top
+
+	   Walk every seat's slot; in split-screen each player can have their
+	   own inventory open simultaneously and the bookkeeping has to run
+	   for all of them.
 	*/
-	if (!m_formspec)
-		return;
+	for (u8 i = 0; i < m_seat_formspec.size(); i++) {
+		GUIFormSpecMenu *fs = m_seat_formspec[i];
+		if (!fs)
+			continue;
 
-	if (m_formspec->getReferenceCount() == 1) {
-		// See GUIFormSpecMenu::create what refcnt = 1 means
-		this->deleteFormspec();
-		return;
-	}
-
-	auto &loc = m_formspec->getFormspecLocation();
-	if (loc.type == InventoryLocation::NODEMETA) {
-		NodeMetadata *meta = m_client->getEnv().getClientMap().getNodeMetadata(loc.p);
-		if (!meta || meta->getString("formspec").empty()) {
-			m_formspec->quitMenu();
-			return;
+		if (fs->getReferenceCount() == 1) {
+			// See GUIFormSpecMenu::create what refcnt = 1 means
+			this->deleteFormspec(i);
+			continue;
 		}
-	}
 
-	if (isMenuActive())
-		guiroot->bringToFront(m_formspec);
+		auto &loc = fs->getFormspecLocation();
+		if (loc.type == InventoryLocation::NODEMETA) {
+			NodeMetadata *meta =
+				m_client->getEnv().getClientMap().getNodeMetadata(loc.p);
+			if (!meta || meta->getString("formspec").empty()) {
+				fs->quitMenu();
+				continue;
+			}
+		}
+
+		if (isMenuActive())
+			guiroot->bringToFront(fs);
+	}
 }
 
 void GameFormSpec::disableDebugView()
 {
-	if (m_formspec) {
-		m_formspec->setDebugView(false);
+	for (GUIFormSpecMenu *fs : m_seat_formspec) {
+		if (fs)
+			fs->setDebugView(false);
 	}
 }
 

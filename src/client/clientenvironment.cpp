@@ -298,7 +298,7 @@ u16 ClientEnvironment::addActiveObject(std::unique_ptr<ClientActiveObject> objec
 	if (!m_ao_manager.registerObject(std::move(object)))
 		return 0;
 
-	obj->addToScene(m_texturesource, m_client->getSceneManager());
+	obj->addToScene(m_texturesource, m_client->getSceneManager(), m_client->getSceneRoot());
 
 	// Update lighting immediately
 	obj->updateLight(getDayNightRatio());

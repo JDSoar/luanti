@@ -45,6 +45,18 @@ public:
 	void draw();
 	void quitMenu();
 
+	/// Restrict this menu to render inside `vp` (in real screen pixels)
+	/// instead of taking the full window. Used by split-screen mode so
+	/// that e.g. seat 1's inventory only appears in seat 1's panel
+	/// instead of being painted across the whole screen on top of every
+	/// player's view. An empty rect (default) disables the override.
+	///
+	/// The viewport changes both layout (the menu is regenerated using
+	/// the viewport size as its "screen size") and absolute positioning
+	/// (the menu is translated to the viewport's upper-left corner).
+	void setViewport(const core::rect<s32> &vp);
+	const core::rect<s32> &getViewport() const { return m_viewport; }
+
 	virtual void regenerateGui(v2u32 screensize) = 0;
 	virtual void drawMenu() = 0;
 	virtual bool preprocessEvent(const SEvent &event);
@@ -66,6 +78,13 @@ protected:
 	v2s32 m_old_pointer;  // Mouse position after previous mouse event
 
 	v2u32 m_screensize_old;
+	// Tracks the viewport origin we last regenerated for so we can detect
+	// when the seat layout shifts (window resize / seat count change) and
+	// rerun regenerateGui + the translation.
+	v2s32 m_viewport_origin_old{0, 0};
+	// When non-empty, draw / lay this menu out inside this rectangle of
+	// the screen instead of using the full window. See setViewport().
+	core::rect<s32> m_viewport{0, 0, 0, 0};
 	float m_gui_scale;
 #ifdef __ANDROID__
 	std::string m_jni_field_name;

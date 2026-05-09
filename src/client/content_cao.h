@@ -252,7 +252,8 @@ public:
 
 	void removeFromScene(bool permanent) override;
 
-	void addToScene(ITextureSource *tsrc, scene::ISceneManager *smgr) override;
+	void addToScene(ITextureSource *tsrc, scene::ISceneManager *smgr,
+			scene::ISceneNode *parent) override;
 
 	inline void expireVisuals()
 	{

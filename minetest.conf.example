@@ -3671,7 +3671,7 @@
 # joystick_id = 0
 
 #    The type of joystick
-#    type: enum values: auto, generic, xbox, ps5, dragonrise_gamecube
+#    type: enum values: auto, generic, xbox, xbox_swapped, ps5, dragonrise_gamecube
 # joystick_type = auto
 
 #    The time in seconds it takes between repeated events

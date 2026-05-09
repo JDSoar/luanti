@@ -627,6 +627,14 @@ void Client::handleCommand_AnnounceMedia(NetworkPacket* pkt)
 	infostream << "Client: Received media announcement: packet size: "
 			<< pkt->getSize() << std::endl;
 
+	// Split-screen secondary seats share the primary's TextureSource /
+	// sound manager / etc. Letting them re-download and re-insert media
+	// races against the primary's already-running mesh thread (which is
+	// reading the same shared resources) and corrupts texture pointers.
+	// The primary already loaded everything; just discard the announce.
+	if (m_shares_content_with_other_client)
+		return;
+
 	if (m_media_downloader == NULL ||
 			m_media_downloader->isStarted()) {
 		const char *problem = m_media_downloader ?
@@ -702,6 +710,12 @@ void Client::handleCommand_Media(NetworkPacket* pkt)
 	if (num_files == 0)
 		return;
 
+	// See handleCommand_AnnounceMedia: secondary seats must not touch
+	// the shared TextureSource / sound manager while the primary's
+	// mesh thread is running.
+	if (m_shares_content_with_other_client)
+		return;
+
 	bool init_phase = m_media_downloader && m_media_downloader->isStarted();
 
 	if (init_phase) {
@@ -748,6 +762,17 @@ void Client::handleCommand_NodeDef(NetworkPacket* pkt)
 	infostream << "Client: Received node definitions: packet size: "
 			<< pkt->getSize() << std::endl;
 
+	// Split-screen secondary seats share the primary's NodeDefManager.
+	// Calling deSerialize() on it from this seat would race the
+	// primary's already-running MeshUpdateWorkerThread (which is
+	// reading ContentFeatures / NodeVisuals from the same instance)
+	// and crash inside MapblockMeshGenerator::drawSolidNode on a freed
+	// `f2.visuals` pointer. Skip; the primary already loaded the defs.
+	if (m_shares_content_with_other_client) {
+		m_nodedef_received = true;
+		return;
+	}
+
 	// Mesh update thread must be stopped while
 	// updating content definitions
 	sanity_check(!m_mesh_update_manager->isRunning());
@@ -769,6 +794,13 @@ void Client::handleCommand_ItemDef(NetworkPacket* pkt)
 {
 	infostream << "Client: Received item definitions: packet size: "
 			<< pkt->getSize() << std::endl;
+
+	// See handleCommand_NodeDef: secondary seats share the primary's
+	// IItemDefManager, so deSerialize() here would race the primary.
+	if (m_shares_content_with_other_client) {
+		m_itemdef_received = true;
+		return;
+	}
 
 	// Mesh update thread must be stopped while
 	// updating content definitions
@@ -1712,6 +1744,13 @@ void Client::handleCommand_MediaPush(NetworkPacket *pkt)
 			!string_allowed(filename, TEXTURENAME_ALLOWED_CHARS)) {
 		throw PacketError("Illegal filename, data or hash");
 	}
+
+	// See handleCommand_NodeDef: secondary split-screen seats share the
+	// primary's TextureSource / sound manager. The primary already
+	// processed (or is processing) this push; handling it here would
+	// race the primary's mesh thread on shared resources.
+	if (m_shares_content_with_other_client)
+		return;
 
 	verbosestream << "Server pushes media file \"" << filename << "\" ";
 	if (filedata.empty())

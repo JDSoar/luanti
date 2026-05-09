@@ -136,7 +136,9 @@ Client::Client(
 		MtEventManager *event,
 		RenderingEngine *rendering_engine,
 		ItemVisualsManager *item_visuals_manager,
-		ELoginRegister allow_login_or_register
+		ELoginRegister allow_login_or_register,
+		scene::ISceneManager *scene_manager,
+		s32 client_map_id
 ):
 	m_tsrc(tsrc),
 	m_shsrc(shsrc),
@@ -145,10 +147,18 @@ Client::Client(
 	m_sound(sound),
 	m_event(event),
 	m_rendering_engine(rendering_engine),
+	// If the caller supplied a per-seat scene manager, take ownership of
+	// a reference (drop()'d in the destructor); otherwise fall back to the
+	// engine's main scene manager (lifetime owned by RenderingEngine, do
+	// not drop()). m_owns_smgr tracks which case we're in.
+	m_smgr(scene_manager ? (scene_manager->grab(), scene_manager)
+			: rendering_engine->get_scene_manager()),
+	m_owns_smgr(scene_manager != nullptr),
 	m_item_visuals_manager(item_visuals_manager),
 	m_mesh_update_manager(std::make_unique<MeshUpdateManager>(this)),
 	m_env(
-		make_irr<ClientMap>(this, rendering_engine, control, 666),
+		make_irr<ClientMap>(this, rendering_engine, control, client_map_id,
+				m_smgr, m_smgr->getRootSceneNode()),
 		tsrc, this
 	),
 	m_particle_manager(std::make_unique<ParticleManager>(&m_env)),
@@ -428,6 +438,14 @@ Client::~Client()
 	for (auto &csp : m_sounds_client_to_server)
 		m_sound->freeId(csp.first);
 	m_sounds_client_to_server.clear();
+
+	// Drop our reference to the per-seat scene manager (only if we
+	// grabbed one in the constructor; the engine-owned global scene
+	// manager must NOT be drop()'d here).
+	if (m_owns_smgr && m_smgr) {
+		m_smgr->drop();
+		m_smgr = nullptr;
+	}
 }
 
 void Client::connect(const Address &address, const std::string &address_name)
@@ -1664,7 +1682,12 @@ bool Client::consumeSkipNextWieldAnimation()
 
 scene::ISceneManager* Client::getSceneManager()
 {
-	return m_rendering_engine->get_scene_manager();
+	return m_smgr;
+}
+
+scene::ISceneNode* Client::getSceneRoot()
+{
+	return m_smgr ? m_smgr->getRootSceneNode() : nullptr;
 }
 
 Inventory* Client::getInventory(const InventoryLocation &loc)
@@ -1860,6 +1883,32 @@ void Client::setFatalError(const LuaError &e)
 	setFatalError(std::string("Lua: ") + e.what());
 }
 
+void Client::setSharesContentWithPrimary(Client *primary)
+{
+	m_shares_content_with_other_client = primary != nullptr;
+	if (!primary)
+		return;
+
+	// We will short-circuit the TOCLIENT_NODEDEF / TOCLIENT_ITEMDEF /
+	// TOCLIENT_ANNOUNCE_MEDIA / TOCLIENT_MEDIA handlers, so the wait
+	// loop in Game::initializeSeats / Game::getServerContent must not
+	// hang waiting for those packets to arrive. Mark the corresponding
+	// "received" flags now so getServerContent() exits as soon as the
+	// connection reaches LC_Init.
+	m_nodedef_received = true;
+	m_itemdef_received = true;
+	// mediaReceived() is `!m_media_downloader`. The constructor created
+	// a fresh downloader; drop it so mediaReceived() returns true.
+	m_media_downloader.reset();
+
+	// `m_mesh_data` is per-Client (not shared like the TextureSource).
+	// Skipping handleCommand_Media means we never populate it from the
+	// network; without this copy, every remote player's CAO (and
+	// anything else loading e.g. "character.b3d") fails on this seat
+	// with "Client::getMesh(): Mesh not found".
+	m_mesh_data = primary->getMeshData();
+}
+
 const Address Client::getServerAddress()
 {
 	return m_con ? m_con->GetPeerAddress(PEER_ID_SERVER) : Address();
@@ -1908,51 +1957,69 @@ void Client::showUpdateProgressTexture(void *args, float progress)
 		0, shown_progress);
 }
 
-void Client::afterContentReceived()
+void Client::afterContentReceived(bool rebuild_shared_assets)
 {
-	infostream<<"Client::afterContentReceived() started"<<std::endl;
+	infostream<<"Client::afterContentReceived() started"
+			<< (rebuild_shared_assets ? "" : " (skipping shared rebuilds)")
+			<< std::endl;
 	assert(m_itemdef_received); // pre-condition
 	assert(m_nodedef_received); // pre-condition
 	assert(mediaReceived()); // pre-condition
 
-	// Clear cached pre-scaled 2D GUI images, as this cache
-	// might have images with the same name but different
-	// content from previous sessions.
-	guiScalingCacheClear();
+	// Everything from here through `m_mesh_update_manager->start()` either
+	// touches engine-wide singletons (texture source, shader source, node
+	// def manager, item def manager) or rebuilds caches that were already
+	// rebuilt by the primary client's afterContentReceived(). For an
+	// additional split-screen seat (rebuild_shared_assets == false) we
+	// must NOT redo any of that work: in particular, calling
+	// `m_tsrc->rebuildImagesAndTextures()` from a secondary seat replaces
+	// every shared texture's underlying ITexture* and trashes the old
+	// pointers (see TextureSource::rebuildTexture), which leaves every
+	// already-built MapBlockMesh in seats 0..N-1 holding dangling texture
+	// pointers in its materials. The next frame's setMaterial then logs
+	// "Tried to set a texture not owned by this driver" floods and
+	// eventually segfaults inside setMaterial -> ITexture::getDriverType.
+	if (rebuild_shared_assets) {
+		// Clear cached pre-scaled 2D GUI images, as this cache
+		// might have images with the same name but different
+		// content from previous sessions.
+		guiScalingCacheClear();
 
-	// Rebuild inherited images and recreate textures
-	infostream<<"- Rebuilding images and textures"<<std::endl;
-	m_rendering_engine->draw_load_screen(wstrgettext("Loading textures..."),
-			guienv, m_tsrc, 0, 66);
-	m_tsrc->rebuildImagesAndTextures();
+		// Rebuild inherited images and recreate textures
+		infostream<<"- Rebuilding images and textures"<<std::endl;
+		m_rendering_engine->draw_load_screen(wstrgettext("Loading textures..."),
+				guienv, m_tsrc, 0, 66);
+		m_tsrc->rebuildImagesAndTextures();
 
-	// Rebuild shaders
-	infostream<<"- Rebuilding shaders"<<std::endl;
-	m_rendering_engine->draw_load_screen(wstrgettext("Rebuilding shaders..."),
-			guienv, m_tsrc, 0, 68);
-	m_shsrc->rebuildShaders();
+		// Rebuild shaders
+		infostream<<"- Rebuilding shaders"<<std::endl;
+		m_rendering_engine->draw_load_screen(wstrgettext("Rebuilding shaders..."),
+				guienv, m_tsrc, 0, 68);
+		m_shsrc->rebuildShaders();
 
-	// Update node aliases
-	infostream<<"- Updating node aliases"<<std::endl;
-	m_rendering_engine->draw_load_screen(wstrgettext("Initializing nodes..."),
-			guienv, m_tsrc, 0, 70);
-	m_nodedef->updateAliases(m_itemdef);
-	for (const auto &path : getTextureDirs()) {
-		TextureOverrideSource override_source(path + DIR_DELIM + "override.txt");
-		m_nodedef->applyTextureOverrides(override_source.getNodeTileOverrides());
-		m_itemdef->applyTextureOverrides(override_source.getItemTextureOverrides());
+		// Update node aliases
+		infostream<<"- Updating node aliases"<<std::endl;
+		m_rendering_engine->draw_load_screen(wstrgettext("Initializing nodes..."),
+				guienv, m_tsrc, 0, 70);
+		m_nodedef->updateAliases(m_itemdef);
+		for (const auto &path : getTextureDirs()) {
+			TextureOverrideSource override_source(path + DIR_DELIM + "override.txt");
+			m_nodedef->applyTextureOverrides(override_source.getNodeTileOverrides());
+			m_itemdef->applyTextureOverrides(override_source.getItemTextureOverrides());
+		}
+		m_nodedef->setNodeRegistrationStatus(true);
+		m_nodedef->runNodeResolveCallbacks();
+
+		// Update node textures and assign shaders to each tile
+		infostream<<"- Updating node textures"<<std::endl;
+		TextureUpdateArgs tu_args;
+		tu_args.last_time_ms = porting::getTimeMs();
+		tu_args.text_base = wstrgettext("Initializing nodes");
+		NodeVisuals::fillNodeVisuals(m_nodedef, this, &tu_args);
 	}
-	m_nodedef->setNodeRegistrationStatus(true);
-	m_nodedef->runNodeResolveCallbacks();
 
-	// Update node textures and assign shaders to each tile
-	infostream<<"- Updating node textures"<<std::endl;
-	TextureUpdateArgs tu_args;
-	tu_args.last_time_ms = porting::getTimeMs();
-	tu_args.text_base = wstrgettext("Initializing nodes");
-	NodeVisuals::fillNodeVisuals(m_nodedef, this, &tu_args);
-
-	// Start mesh update thread after setting up content definitions
+	// Per-seat: each Client owns its own MeshUpdateManager / mesh thread,
+	// so this must run for every seat regardless of rebuild_shared_assets.
 	infostream<<"- Starting mesh update thread"<<std::endl;
 	m_mesh_update_manager->start();
 

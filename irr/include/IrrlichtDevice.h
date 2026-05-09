@@ -259,6 +259,20 @@ public:
 	*/
 	virtual bool activateJoysticks(core::array<SJoystickInfo> &joystickInfo) = 0;
 
+	//! Trigger force-feedback rumble on a previously-activated joystick.
+	/** \param joystickIndex Index into the array returned by activateJoysticks.
+	\param lowFrequencyRumble  Strength of the heavy / low-frequency motor (0..65535).
+	\param highFrequencyRumble Strength of the light / high-frequency motor (0..65535).
+	\param durationMs Duration of the rumble in milliseconds. 0 stops the current rumble.
+	\return true if the rumble request was accepted by the device. */
+	virtual bool rumbleJoystick(u32 joystickIndex, u16 lowFrequencyRumble,
+			u16 highFrequencyRumble, u32 durationMs)
+	{
+		(void)joystickIndex; (void)lowFrequencyRumble;
+		(void)highFrequencyRumble; (void)durationMs;
+		return false;
+	}
+
 	//! Activate accelerometer.
 	virtual bool activateAccelerometer(float updateInterval = 0.016666f) = 0;
 

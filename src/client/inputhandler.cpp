@@ -189,6 +189,36 @@ bool MyEventReceiver::OnEvent(const SEvent &event)
 	if (isMenuActive()) {
 		if (g_touchcontrols)
 			g_touchcontrols->setVisible(false);
+		// Joystick: each GUIFormSpecMenu only calls handleEvent() for its own
+		// device. If no menu claimed the event (e.g. other split-screen seat's
+		// gamepad while one seat has a formspec), still update that controller
+		// so the other player can move.
+		if (event.EventType == EET_JOYSTICK_INPUT_EVENT) {
+			bool menu_handled = g_menumgr.preprocessEvent(event);
+			if (menu_handled)
+				return true;
+			bool joy_updated = false;
+			for (auto *j : m_joysticks) {
+				if (j && j->getJoystickId() == event.JoystickEvent.Joystick) {
+					j->handleEvent(event.JoystickEvent);
+					joy_updated = true;
+				}
+			}
+			if (joystick && joystick->getJoystickId() == event.JoystickEvent.Joystick) {
+				bool listed = false;
+				for (auto *j : m_joysticks) {
+					if (j == joystick) {
+						listed = true;
+						break;
+					}
+				}
+				if (!listed) {
+					joystick->handleEvent(event.JoystickEvent);
+					joy_updated = true;
+				}
+			}
+			return joy_updated;
+		}
 		return g_menumgr.preprocessEvent(event);
 	}
 
@@ -203,7 +233,15 @@ bool MyEventReceiver::OnEvent(const SEvent &event)
 		return true;
 	} else if (event.EventType == EET_JOYSTICK_INPUT_EVENT) {
 		// joystick may be nullptr if game is launched with '--random-input' parameter
-		return joystick && joystick->handleEvent(event.JoystickEvent);
+		bool handled = false;
+		for (auto *j : m_joysticks) {
+			if (j && j->handleEvent(event.JoystickEvent))
+				handled = true;
+		}
+		// Backwards compatibility: if nothing registered, fall back.
+		if (!handled && joystick)
+			handled = joystick->handleEvent(event.JoystickEvent);
+		return handled;
 	} else if (event.EventType == EET_MOUSE_INPUT_EVENT) {
 		// Handle mouse events
 		switch (event.MouseInput.Event) {

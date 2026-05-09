@@ -369,6 +369,15 @@ void Hud::drawLuaElements(const v3s16 &camera_offset)
 		return l->z_index < r->z_index;
 	});
 
+	// HUD element offsets are in "logical" pixels and get multiplied by
+	// m_scale_factor at draw time (in drawStatbar / drawItems / etc.).
+	// resizeHotbar() folds the per-seat split-screen scale into
+	// m_scale_factor, so this lambda only needs to forward the raw
+	// offset in pixel units.
+	auto scaled_offset = [](const v2f &offset) -> v2s32 {
+		return v2s32(offset.X, offset.Y);
+	};
+
 	for (HudElement *e : elems) {
 
 		v2s32 pos(floor(e->pos.X * (float) m_screensize.X + 0.5),
@@ -410,8 +419,9 @@ void Hud::drawLuaElements(const v3s16 &camera_offset)
 				v2s32 offset(0, (e->align.Y - 1.0) * (textsize.Height / 2));
 				core::rect<s32> size(0, 0, e->scale.X * m_scale_factor,
 						text_height * e->scale.Y * m_scale_factor);
-				v2s32 offs(e->offset.X * m_scale_factor,
-						e->offset.Y * m_scale_factor);
+				v2s32 hud_offset = scaled_offset(e->offset);
+				v2s32 offs(hud_offset.X * m_scale_factor,
+						hud_offset.Y * m_scale_factor);
 
 				// Draw each line
 				// See also: GUIFormSpecMenu::parseLabel
@@ -429,7 +439,7 @@ void Hud::drawLuaElements(const v3s16 &camera_offset)
 				}
 				break; }
 			case HUD_ELEM_STATBAR: {
-				v2s32 offs(e->offset.X, e->offset.Y);
+				v2s32 offs = scaled_offset(e->offset);
 				drawStatbar(pos, HUD_CORNER_UPPER, e->dir, e->text, e->text2,
 					e->number, e->item, offs, e->size);
 				break; }
@@ -437,14 +447,14 @@ void Hud::drawLuaElements(const v3s16 &camera_offset)
 				InventoryList *inv = inventory->getList(e->text);
 				if (!inv)
 					warningstream << "HUD: Unknown inventory list. name=" << e->text << std::endl;
-				drawItems(pos, v2s32(e->offset.X, e->offset.Y), e->number, e->align, 0,
+				drawItems(pos, scaled_offset(e->offset), e->number, e->align, 0,
 					inv, e->item, e->dir, false);
 				break; }
 			case HUD_ELEM_WAYPOINT: {
 				if (!calculateScreenPos(camera_offset, e, &pos))
 					break;
 
-				pos += v2s32(e->offset.X, e->offset.Y);
+				pos += scaled_offset(e->offset);
 				video::SColor color(255, (e->number >> 16) & 0xFF,
 										 (e->number >> 8)  & 0xFF,
 										 (e->number >> 0)  & 0xFF);
@@ -493,8 +503,9 @@ void Hud::drawLuaElements(const v3s16 &camera_offset)
 				v2s32 offset((e->align.X - 1.0) * dstsize.X / 2,
 				             (e->align.Y - 1.0) * dstsize.Y / 2);
 				core::rect<s32> rect(0, 0, dstsize.X, dstsize.Y);
-				rect += pos + offset + v2s32(e->offset.X * m_scale_factor,
-				                             e->offset.Y * m_scale_factor);
+				v2s32 hud_offset = scaled_offset(e->offset);
+				rect += pos + offset + v2s32(hud_offset.X * m_scale_factor,
+				                             hud_offset.Y * m_scale_factor);
 				draw2DImageFilterScaled(driver, texture, rect,
 					core::rect<s32>(core::position2d<s32>(0,0), imgsize),
 					NULL, colors, true);
@@ -523,11 +534,13 @@ void Hud::drawLuaElements(const v3s16 &camera_offset)
 				// Limit angle and ajust with given offset
 				angle = (angle + (int)e->number) % 360;
 
+				v2s32 hud_offset = scaled_offset(e->offset);
 				core::rect<s32> dstrect(0, 0, dstsize.X, dstsize.Y);
 				dstrect += pos + v2s32(
 								(e->align.X - 1.0) * dstsize.X / 2,
 								(e->align.Y - 1.0) * dstsize.Y / 2) +
-						v2s32(e->offset.X * m_hud_scaling, e->offset.Y * m_hud_scaling);
+						v2s32(hud_offset.X * m_hud_scaling,
+								hud_offset.Y * m_hud_scaling);
 
 				switch (e->dir) {
 				case HUD_COMPASS_ROTATE:
@@ -565,12 +578,14 @@ void Hud::drawLuaElements(const v3s16 &camera_offset)
 				v2s32 offset((e->align.X - 1.0) * dstsize.X / 2,
 				             (e->align.Y - 1.0) * dstsize.Y / 2);
 				core::rect<s32> rect(0, 0, dstsize.X, dstsize.Y);
-				rect += pos + offset + v2s32(e->offset.X * m_scale_factor,
-				                             e->offset.Y * m_scale_factor);
+				v2s32 hud_offset = scaled_offset(e->offset);
+				rect += pos + offset + v2s32(hud_offset.X * m_scale_factor,
+				                             hud_offset.Y * m_scale_factor);
 				client->getMinimap()->drawMinimap(rect);
 				break; }
 			case HUD_ELEM_HOTBAR: {
-				drawHotbar(pos, e->offset, e->dir, e->align);
+				v2s32 hud_offset = scaled_offset(e->offset);
+				drawHotbar(pos, v2f(hud_offset.X, hud_offset.Y), e->dir, e->align);
 				break; }
 			default:
 				infostream << "Hud::drawLuaElements: ignoring drawform " << e->type
@@ -1030,14 +1045,30 @@ void Hud::updateSelectionMesh(const v3s16 &camera_offset)
 }
 
 void Hud::resizeHotbar() {
-	const v2u32 &window_size = RenderingEngine::getWindowSize();
+	// Use the per-frame override if split-screen has set one, otherwise
+	// fall back to the real window size. Per-seat HUDs in split-screen
+	// keep the same absolute icon sizes (24px hearts, 48px hotbar slots)
+	// as the single-player view; only m_screensize / m_displaycenter
+	// switch to the seat's viewport so positioning is "bottom of the
+	// pane" instead of "bottom of the window".
+	const v2u32 active_size = (m_screensize_override.X > 0 &&
+			m_screensize_override.Y > 0)
+		? m_screensize_override
+		: RenderingEngine::getWindowSize();
 
-	if (m_screensize != window_size) {
+	if (m_screensize != active_size) {
 		m_hotbar_imagesize = floor(HOTBAR_IMAGE_SIZE *
 			RenderingEngine::getDisplayDensity() + 0.5);
 		m_hotbar_imagesize *= m_hud_scaling;
 		m_padding = m_hotbar_imagesize / 12;
-		m_screensize = window_size;
+		m_scale_factor = m_hud_scaling *
+				RenderingEngine::getDisplayDensity();
+		m_screensize = active_size;
 		m_displaycenter = v2s32(m_screensize.X/2,m_screensize.Y/2);
 	}
+}
+
+void Hud::setScreensizeOverride(const v2u32 &size)
+{
+	m_screensize_override = size;
 }

@@ -20,8 +20,6 @@ class RenderingCore
 {
 protected:
 	IrrlichtDevice *device;
-	Client *client;
-	Hud *hud;
 	std::unique_ptr<ShadowRenderer> shadow_renderer;
 
 	std::unique_ptr<RenderPipeline> pipeline;
@@ -30,7 +28,7 @@ protected:
 	v2u32 virtual_size { 0, 0 };
 
 public:
-	RenderingCore(IrrlichtDevice *device, Client *client, Hud *hud,
+	RenderingCore(IrrlichtDevice *device,
 			std::unique_ptr<ShadowRenderer> shadow_renderer,
 			std::unique_ptr<RenderPipeline> pipeline,
 			v2f virtual_size_scale);
@@ -41,7 +39,7 @@ public:
 	RenderingCore &operator=(const RenderingCore &) = delete;
 	RenderingCore &operator=(RenderingCore &&) = delete;
 
-	void draw(video::SColor _skycolor, bool _show_hud,
+	void draw(Client *client, Hud *hud, video::SColor _skycolor, bool _show_hud,
 			bool _draw_wield_tool, bool _draw_crosshair);
 
 	v2u32 getVirtualSize() const;

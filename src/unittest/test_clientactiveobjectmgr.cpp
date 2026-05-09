@@ -17,7 +17,8 @@ public:
 	TestClientActiveObject() : ClientActiveObject(0, nullptr, nullptr) {}
 	~TestClientActiveObject() = default;
 	ActiveObjectType getType() const { return ACTIVEOBJECT_TYPE_TEST; }
-	virtual void addToScene(ITextureSource *tsrc, scene::ISceneManager *smgr) {}
+	virtual void addToScene(ITextureSource *tsrc, scene::ISceneManager *smgr,
+			scene::ISceneNode *parent) {}
 };
 
 class TestSelectableClientActiveObject : public ClientActiveObject
@@ -30,7 +31,8 @@ public:
 
 	~TestSelectableClientActiveObject() = default;
 	ActiveObjectType getType() const override { return ACTIVEOBJECT_TYPE_TEST; }
-	void addToScene(ITextureSource *tsrc, scene::ISceneManager *smgr) override {}
+	void addToScene(ITextureSource *tsrc, scene::ISceneManager *smgr,
+			scene::ISceneNode *parent) override {}
 	bool getSelectionBox(aabb3f *toset) const override { *toset = selection_box; return true; }
 	const v3f getPosition() const override { return position; }
 

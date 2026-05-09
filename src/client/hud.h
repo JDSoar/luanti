@@ -64,6 +64,11 @@ public:
 
 	void drawHotbar(const v2s32 &pos, const v2f &offset, u16 direction, const v2f &align);
 	void resizeHotbar();
+	// Override the size used to lay out HUD elements. Used by split-screen
+	// rendering so each seat's HUD lays out inside its viewport instead of
+	// the full window. Pass v2u32(0,0) to clear the override and resume
+	// using the actual window size.
+	void setScreensizeOverride(const v2u32 &size);
 	void drawCrosshair();
 	void drawSelectionMesh();
 	void updateSelectionMesh(const v3s16 &camera_offset);
@@ -129,6 +134,10 @@ private:
 	v2s32 m_displaycenter;
 	s32 m_hotbar_imagesize; // Takes hud_scaling into account, updated by resizeHotbar()
 	s32 m_padding; // Takes hud_scaling into account, updated by resizeHotbar()
+	// When non-zero, resizeHotbar() and 2D drawing use this size instead of
+	// the actual window size. Set per-frame by split-screen rendering so the
+	// HUD lays out inside the seat's viewport.
+	v2u32 m_screensize_override = v2u32(0, 0);
 	video::SColor hbar_colors[4];
 
 	std::vector<aabb3f> m_selection_boxes;
