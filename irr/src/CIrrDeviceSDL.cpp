@@ -24,6 +24,7 @@
 #else
 #include <SDL_video.h>
 #include <SDL_messagebox.h>
+#include <SDL_gamecontroller.h>
 #endif
 
 #include <cstdio>
@@ -1258,15 +1259,33 @@ bool CIrrDeviceSDL::rumbleJoystick(u32 joystickIndex, u16 lowFrequencyRumble,
 #if defined(_IRR_COMPILE_WITH_JOYSTICK_EVENTS_)
 	if (joystickIndex >= Joysticks.size() || !Joysticks[joystickIndex])
 		return false;
-	// SDL3: SDL_RumbleJoystick. SDL2: SDL_JoystickRumble (aliased above).
-	// Returns 0 on success in SDL2; SDL3 returns a bool. Treat any non-zero
-	// return as success in SDL2 land via the macro indirection.
+	SDL_Joystick *j = Joysticks[joystickIndex];
+	// SDL3: SDL_RumbleJoystick returns bool; SDL2 SDL_JoystickRumble returns 0
+	// on success (via SDL_RumbleJoystick macro in this file).
 #ifdef _IRR_USE_SDL3_
-	return SDL_RumbleJoystick(Joysticks[joystickIndex],
-			lowFrequencyRumble, highFrequencyRumble, durationMs);
+	bool ok = SDL_RumbleJoystick(j, lowFrequencyRumble, highFrequencyRumble,
+			durationMs);
+	// Some pads only respond to gamepad rumble after JoystickOpen.
+	if (!ok) {
+		SDL_Gamepad *pad = SDL_GetGamepadFromJoystick(j);
+		if (pad)
+			ok = SDL_RumbleGamepad(pad, lowFrequencyRumble, highFrequencyRumble,
+					durationMs);
+	}
+	return ok;
 #else
-	return SDL_RumbleJoystick(Joysticks[joystickIndex],
-			lowFrequencyRumble, highFrequencyRumble, durationMs) == 0;
+	bool ok = SDL_JoystickRumble(j, lowFrequencyRumble, highFrequencyRumble,
+			durationMs) == 0;
+	// Many Xbox / DualSense stacks expose rumble only through the game
+	// controller interface; the second device is especially prone to this.
+	if (!ok) {
+		const SDL_JoystickID jid = SDL_JoystickInstanceID(j);
+		SDL_GameController *gc = SDL_GameControllerFromInstanceID(jid);
+		if (gc)
+			ok = SDL_GameControllerRumble(gc, lowFrequencyRumble,
+					highFrequencyRumble, durationMs) == 0;
+	}
+	return ok;
 #endif
 #else
 	(void)joystickIndex; (void)lowFrequencyRumble;

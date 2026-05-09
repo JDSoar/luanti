@@ -2808,6 +2808,8 @@ void Game::handleClientEvent_PlayerDamage(ClientEvent *event, CameraOrientation 
 		// Gamepad rumble proportional to damage (Minecraft Bedrock style).
 		// Light damage ⇒ short, light buzz; heavy damage ⇒ longer, heavy
 		// rumble. Skipped when the user has joysticks or rumble disabled.
+		// Split-screen: `processClientEvents` swaps `input` with each seat's
+		// handler while draining that seat's queue (same as `client`).
 		if (m_cache_enable_joysticks
 				&& g_settings->getBool("joystick_rumble_enable")) {
 			const float user_scale = rangelim(
@@ -3202,11 +3204,13 @@ void Game::processClientEvents(CameraOrientation *cam)
 	// Seats 1..N: each has its own Client (and ClientEvent queue). We
 	// temporarily swap the global `client` pointer so handlers that read
 	// it (PlayerDamage's modsLoaded() check, particle handler, ...) see
-	// the right Client. PlayerForceMove writes through the `cam`
-	// parameter, so feed each seat its own CameraOrientation too,
-	// otherwise a server-side setplayer() on seat 1 would yank seat 0's
-	// view.
+	// the right Client. We also swap `input` so per-seat handlers (damage
+	// rumble, death screen, ...) resolve the correct JoystickController.
+	// PlayerForceMove writes through the `cam` parameter, so feed each seat
+	// its own CameraOrientation too, otherwise a server-side setplayer() on
+	// seat 1 would yank seat 0's view.
 	Client *saved_client = client;
+	InputHandler *saved_input = input;
 	for (u8 i = 1; i < m_splitscreen_seats; i++) {
 		auto &seat = m_seats[i];
 		if (!seat.client)
@@ -3214,6 +3218,7 @@ void Game::processClientEvents(CameraOrientation *cam)
 
 		m_current_event_seat = i;
 		client = seat.client;
+		input = seat.input ? seat.input.get() : saved_input;
 
 		while (client->hasClientEvents()) {
 			std::unique_ptr<ClientEvent> event(client->getClientEvent());
@@ -3225,6 +3230,7 @@ void Game::processClientEvents(CameraOrientation *cam)
 		}
 	}
 	client = saved_client;
+	input = saved_input;
 	m_current_event_seat = 0;
 }
 
