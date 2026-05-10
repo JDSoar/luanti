@@ -25,6 +25,13 @@ libogg-dev libvorbis-dev libopenal-dev libcurl4-gnutls-dev libfreetype6-dev \
 zlib1g-dev libgmp-dev libjsoncpp-dev libzstd-dev libluajit-5.1-dev \
 gettext libsdl2-dev`
 
+sudo apt install -y build-essential cmake \
+libpng-dev libjpeg-dev libgl1-mesa-dev libglu1-mesa-dev mesa-common-dev \
+libglx-mesa0 libgles2-mesa-dev libegl1-mesa-dev \
+libsqlite3-dev libogg-dev libvorbis-dev libopenal-dev \
+libcurl4-gnutls-dev libfreetype6-dev zlib1g-dev libgmp-dev \
+libjsoncpp-dev libzstd-dev libluajit-5.1-dev gettext libsdl2-dev libx11-dev
+
 4. Compile it (Run-in-Place mode – easiest)
 `cmake . -DRUN_IN_PLACE=TRUE`
 `make -j$(nproc)`
