@@ -390,6 +390,9 @@ private:
 	JoystickController        *m_joystick;
 	bool                       m_gamepad_inv_pointer_init = false;
 	u64                        m_gamepad_cursor_prev_ms = 0;
+	// After real mouse/touch input, ignore stick-driven cursor warps for a short
+	// time so analog drift / resting axes do not fight the physical mouse.
+	u64                        m_mouse_user_grace_until_ms = 0;
 
 	void ensureGamepadInventoryPointer();
 	void stepGamepadInventoryCursor();

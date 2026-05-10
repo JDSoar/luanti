@@ -548,6 +548,30 @@ list(APPEND client_SRCS
 	${unittest_client_SRCS}
 )
 
+# Forks sometimes drop entries from src/client/CMakeLists.txt during merges; that
+# produces link errors (missing Client::, GenericCAO, FontEngine, the_game, …).
+if(BUILD_CLIENT)
+	set(LUANTI_REQUIRED_CLIENT_CPPS
+		client.cpp
+		content_cao.cpp
+		content_mapblock.cpp
+		fontengine.cpp
+		game.cpp
+		camera.cpp
+		clientmap.cpp
+	)
+	foreach(_src IN LISTS LUANTI_REQUIRED_CLIENT_CPPS)
+		set(_abs "${CMAKE_SOURCE_DIR}/src/client/${_src}")
+		list(FIND client_SRCS "${_abs}" _luanti_client_src_idx)
+		if(_luanti_client_src_idx LESS 0)
+			message(WARNING
+				"Luanti: required \"${_src}\" missing from client_SRCS; appending. "
+				"Repair src/client/CMakeLists.txt so this file is listed like upstream.")
+			list(APPEND client_SRCS "${_abs}")
+		endif()
+	endforeach()
+endif()
+
 # Server sources
 # (nothing here because a client always comes with a server)
 set(server_SRCS

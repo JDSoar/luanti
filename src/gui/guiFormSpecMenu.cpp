@@ -4205,6 +4205,10 @@ void GUIFormSpecMenu::stepGamepadInventoryCursor()
 		ay += dpy * (DPAD_CURSOR_SPEED / CURSOR_SPEED);
 	}
 
+	const u64 now_grace_check = porting::getTimeMs();
+	if (now_grace_check < m_mouse_user_grace_until_ms)
+		return;
+
 	if (ax != 0.f || ay != 0.f) {
 		m_pointer.X += (s32)(ax * CURSOR_SPEED * dt);
 		m_pointer.Y += (s32)(ay * CURSOR_SPEED * dt);
@@ -4268,6 +4272,29 @@ void GUIFormSpecMenu::simulateInventoryMouseClick(bool right_click)
 
 bool GUIFormSpecMenu::preprocessEvent(const SEvent& event)
 {
+	// Let real mouse (not synthesized from gamepad / touch) take priority over
+	// stepGamepadInventoryCursor(), which otherwise calls setPosition every
+	// frame whenever sticks read past the deadzone — common with drift or
+	// mis-mapped axes when multiple controllers are connected.
+	if (event.EventType == EET_MOUSE_INPUT_EVENT && !event.MouseInput.Simulated) {
+		switch (event.MouseInput.Event) {
+		case EMIE_MOUSE_MOVED:
+		case EMIE_MOUSE_WHEEL:
+		case EMIE_LMOUSE_PRESSED_DOWN:
+		case EMIE_MMOUSE_PRESSED_DOWN:
+		case EMIE_RMOUSE_PRESSED_DOWN:
+		case EMIE_LMOUSE_LEFT_UP:
+		case EMIE_MMOUSE_LEFT_UP:
+		case EMIE_RMOUSE_LEFT_UP:
+			m_mouse_user_grace_until_ms = porting::getTimeMs() + 2500;
+			break;
+		default:
+			break;
+		}
+	} else if (event.EventType == EET_TOUCH_INPUT_EVENT) {
+		m_mouse_user_grace_until_ms = porting::getTimeMs() + 2500;
+	}
+
 	// This must be done first so that GUIModalMenu can set m_pointer_type
 	// correctly.
 	if (GUIModalMenu::preprocessEvent(event))
