@@ -436,8 +436,11 @@ enable_joysticks (Enable gamepads) bool false
 #    Requires: enable_joysticks
 joystick_id (Primary gamepad device index) int 0 0 255
 
-#    Button and axis layout preset. "auto" picks from the detected device name.
+#    Button and axis layout preset. "auto" picks from the detected device name
+#    (including USB vendor hints on Linux when the product name is vague).
 #    Use "generic" for the classic Luanti layout, or match your controller type.
+#    If "auto" is wrong on your distro (e.g. Ubuntu vs Fedora), set xbox,
+#    xbox_swapped (sticks reversed), or ps5 explicitly.
 #
 #    Requires: enable_joysticks
 joystick_type (Gamepad layout preset) enum auto auto,generic,xbox,xbox_swapped,ps5,dragonrise_gamecube

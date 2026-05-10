@@ -192,7 +192,8 @@ public:
 	f32 doubling_dtime;
 
 private:
-	void setLayoutFromControllerName(const std::string &name);
+	/** Applies m_layout from a device name or `joystick_type` setting string; returns preset id for logging. */
+	const char *setLayoutFromControllerName(const std::string &name);
 
 	JoystickLayout m_layout;
 

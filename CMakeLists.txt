@@ -101,6 +101,9 @@ endif()
 
 if(TRUE)
 	if(BUILD_CLIENT)
+		# Luanti is built and tested against SDL2 only; Irrlicht’s SDL3 device is not used here.
+		set(USE_SDL3 OFF CACHE BOOL
+			"Use SDL3 with Irrlicht instead of SDL2 (disabled for Luanti)" FORCE)
 		add_subdirectory(irr EXCLUDE_FROM_ALL)
 
 		if(NOT TARGET IrrlichtMt)

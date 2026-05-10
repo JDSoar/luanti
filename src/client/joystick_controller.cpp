@@ -311,18 +311,24 @@ void JoystickController::onJoystickConnect(const std::vector<SJoystickInfo> &joy
 		id = 0;
 	}
 
+	const char *preset_used = "generic";
 	if (id >= 0 && id < (s32)joystick_infos.size()) {
 		if (layout.empty() || layout == "auto")
-			setLayoutFromControllerName(joystick_infos[id].Name.c_str());
+			preset_used = setLayoutFromControllerName(joystick_infos[id].Name.c_str());
 		else
-			setLayoutFromControllerName(layout);
+			preset_used = setLayoutFromControllerName(layout);
+
+		infostream << "Joystick [" << id << "] name=\"" << joystick_infos[id].Name.c_str()
+				<< "\" preset=\"" << preset_used << "\". "
+				"If buttons are wrong, set joystick_type to xbox, xbox_swapped, "
+				"ps5, or generic (requires restart)." << std::endl;
 	}
 
 	// Irrlicht restriction.
-		m_joystick_id = rangelim(id, 0, UINT8_MAX);
+	m_joystick_id = rangelim(id, 0, UINT8_MAX);
 }
 
-void JoystickController::setLayoutFromControllerName(const std::string &name)
+const char *JoystickController::setLayoutFromControllerName(const std::string &name)
 {
 	const std::string n = lowercase(name);
 
@@ -330,26 +336,51 @@ void JoystickController::setLayoutFromControllerName(const std::string &name)
 	// substring matches for wired-only or modpack overrides.
 	if (n == "xbox") {
 		m_layout = create_xbox_layout(false);
+		return "xbox";
 	} else if (n == "xbox_swapped") {
 		// Left/right stick axes reversed in SDL vs xpad (Bluetooth / some drivers)
 		m_layout = create_xbox_layout(true);
+		return "xbox_swapped";
 	} else if (n == "ps5") {
 		m_layout = create_ps5_layout();
+		return "ps5";
 	} else if (n == "generic") {
 		m_layout = create_default_layout();
+		return "generic";
 	} else if (n.find("dragonrise_gamecube") != std::string::npos) {
 		m_layout = create_dragonrise_gamecube_layout();
+		return "dragonrise_gamecube";
 	} else if (n.find("ps5") != std::string::npos ||
 			n.find("dualsense") != std::string::npos) {
 		m_layout = create_ps5_layout();
+		return "ps5";
+	// Linux: SDL/udev sometimes expose only USB vendor ids or generic text on
+	// Ubuntu while Fedora shows a full product name — widen matching so "auto"
+	// still picks the Bedrock-style Xbox/PS maps instead of `generic`.
+	} else if (n.find("dualshock") != std::string::npos ||
+			n.find("sixaxis") != std::string::npos ||
+			n.find("playstation") != std::string::npos ||
+			n.find("sony") != std::string::npos ||
+			n.find("054c") != std::string::npos) { // Sony USB vendor id
+		m_layout = create_ps5_layout();
+		return "ps5";
+	} else if (n.find("045e") != std::string::npos ||
+			n.find("microsoft") != std::string::npos) { // Microsoft USB vendor id
+		m_layout = create_xbox_layout(false);
+		return "xbox";
+	} else if (n.find("8bitdo") != std::string::npos) {
+		// Most 8BitDo modes on Linux follow Xbox-like SDL button numbering.
+		m_layout = create_xbox_layout(false);
+		return "xbox";
 	} else if (n.find("xbox") != std::string::npos ||
 			// Linux evdev: "Microsoft X-Box 360 pad" — hyphen breaks plain `xbox`
 			n.find("x-box") != std::string::npos ||
 			n.find("xinput") != std::string::npos) {
 		m_layout = create_xbox_layout(false);
-	} else {
-		m_layout = create_default_layout();
+		return "xbox";
 	}
+	m_layout = create_default_layout();
+	return "generic";
 }
 
 bool JoystickController::handleEvent(const SEvent::SJoystickEvent &ev)

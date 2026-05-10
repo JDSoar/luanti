@@ -21,6 +21,7 @@
 #ifdef _IRR_USE_SDL3_
 #include <SDL3/SDL_version.h>
 #include <SDL3/SDL_messagebox.h>
+#include <SDL3/SDL_gamepad.h>
 #else
 #include <SDL_video.h>
 #include <SDL_messagebox.h>
@@ -29,6 +30,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
+#include <cstring>
 #include <cassert>
 
 #ifdef _IRR_EMSCRIPTEN_PLATFORM_
@@ -103,6 +106,119 @@
 #else
 	#define SDL_FINGER_ID(ev) ((ev).tfinger.fingerId)
 #endif
+
+#if defined(_IRR_COMPILE_WITH_JOYSTICK_EVENTS_)
+namespace {
+static bool irr_sdl_nameLooksLikeMicrosoftXbox(const char *name)
+{
+	if (!name)
+		return false;
+	char buf[256];
+	size_t i = 0;
+	for (; name[i] && i + 1 < sizeof(buf); ++i)
+		buf[i] = (char)std::tolower((unsigned char)name[i]);
+	buf[i] = '\0';
+	return strstr(buf, "xbox") != nullptr || strstr(buf, "x-box") != nullptr ||
+		strstr(buf, "microsoft") != nullptr;
+}
+
+#ifndef _IRR_USE_SDL3_
+static bool irr_sdl_shouldMapXboxViaGameController(SDL_GameController *gc, SDL_Joystick *joy)
+{
+	if (!gc || !joy)
+		return false;
+	const SDL_GameControllerType ty = SDL_GameControllerGetType(gc);
+	if (ty == SDL_CONTROLLER_TYPE_XBOX360 || ty == SDL_CONTROLLER_TYPE_XBOXONE)
+		return true;
+	// Third-party / BT stacks sometimes report UNKNOWN while SDL still has a mapping.
+	if (ty == SDL_CONTROLLER_TYPE_UNKNOWN)
+		return irr_sdl_nameLooksLikeMicrosoftXbox(SDL_JoystickName(joy));
+	return false;
+}
+
+static void irr_sdl_applyXboxGameController(SDL_GameController *gc, SDL_Joystick *joy,
+		SEvent::SJoystickEvent &je)
+{
+	auto btn = [&](SDL_GameControllerButton b, u32 bit) {
+		if (SDL_GameControllerGetButton(gc, b))
+			je.ButtonStates |= (1u << bit);
+	};
+	je.ButtonStates = 0;
+	btn(SDL_CONTROLLER_BUTTON_A, 0);
+	btn(SDL_CONTROLLER_BUTTON_B, 1);
+	btn(SDL_CONTROLLER_BUTTON_X, 2);
+	btn(SDL_CONTROLLER_BUTTON_Y, 3);
+	btn(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 4);
+	btn(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 5);
+	btn(SDL_CONTROLLER_BUTTON_BACK, 6);
+	btn(SDL_CONTROLLER_BUTTON_START, 7);
+	btn(SDL_CONTROLLER_BUTTON_LEFTSTICK, 9);
+	btn(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 10);
+	if (SDL_GetNumJoystickHats(joy) == 0) {
+		btn(SDL_CONTROLLER_BUTTON_DPAD_UP, 11);
+		btn(SDL_CONTROLLER_BUTTON_DPAD_DOWN, 12);
+		btn(SDL_CONTROLLER_BUTTON_DPAD_LEFT, 13);
+		btn(SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 14);
+	}
+	for (u32 ax = 0; ax < SEvent::SJoystickEvent::NUMBER_OF_AXES; ++ax)
+		je.Axis[ax] = 0;
+	je.Axis[0] = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
+	je.Axis[1] = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY);
+	je.Axis[2] = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+	je.Axis[3] = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX);
+	je.Axis[4] = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY);
+	je.Axis[5] = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+}
+#else
+static bool irr_sdl_shouldMapXboxViaGamepad(SDL_Gamepad *pad, SDL_Joystick *joy)
+{
+	if (!pad || !joy)
+		return false;
+	const SDL_GamepadType ty = SDL_GetGamepadType(pad);
+	if (ty == SDL_GAMEPAD_TYPE_XBOX360 || ty == SDL_GAMEPAD_TYPE_XBOXONE)
+		return true;
+	if (ty == SDL_GAMEPAD_TYPE_UNKNOWN)
+		return irr_sdl_nameLooksLikeMicrosoftXbox(SDL_GetJoystickName(joy));
+	return false;
+}
+
+static void irr_sdl_applyXboxGamepad(SDL_Gamepad *pad, SDL_Joystick *joy,
+		SEvent::SJoystickEvent &je)
+{
+	auto btn = [&](SDL_GamepadButton b, u32 bit) {
+		if (SDL_GetGamepadButton(pad, b))
+			je.ButtonStates |= (1u << bit);
+	};
+	je.ButtonStates = 0;
+	btn(SDL_GAMEPAD_BUTTON_SOUTH, 0);
+	btn(SDL_GAMEPAD_BUTTON_EAST, 1);
+	btn(SDL_GAMEPAD_BUTTON_WEST, 2);
+	btn(SDL_GAMEPAD_BUTTON_NORTH, 3);
+	btn(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, 4);
+	btn(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, 5);
+	btn(SDL_GAMEPAD_BUTTON_BACK, 6);
+	btn(SDL_GAMEPAD_BUTTON_START, 7);
+	btn(SDL_GAMEPAD_BUTTON_LEFT_STICK, 9);
+	btn(SDL_GAMEPAD_BUTTON_RIGHT_STICK, 10);
+	if (SDL_GetNumJoystickHats(joy) == 0) {
+		btn(SDL_GAMEPAD_BUTTON_DPAD_UP, 11);
+		btn(SDL_GAMEPAD_BUTTON_DPAD_DOWN, 12);
+		btn(SDL_GAMEPAD_BUTTON_DPAD_LEFT, 13);
+		btn(SDL_GAMEPAD_BUTTON_DPAD_RIGHT, 14);
+	}
+	for (u32 ax = 0; ax < SEvent::SJoystickEvent::NUMBER_OF_AXES; ++ax)
+		je.Axis[ax] = 0;
+	je.Axis[0] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
+	je.Axis[1] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
+	je.Axis[2] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+	je.Axis[3] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
+	je.Axis[4] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+	je.Axis[5] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+}
+#endif
+
+} // namespace
+#endif // _IRR_COMPILE_WITH_JOYSTICK_EVENTS_
 
 static int SDLDeviceInstances = 0;
 
@@ -439,6 +555,11 @@ CIrrDeviceSDL::CIrrDeviceSDL(const SIrrlichtCreationParameters &param) :
 			flags |= SDL_INIT_VIDEO;
 #if defined(_IRR_COMPILE_WITH_JOYSTICK_EVENTS_)
 		flags |= SDL_INIT_JOYSTICK;
+#ifndef _IRR_USE_SDL3_
+		flags |= SDL_INIT_GAMECONTROLLER;
+#else
+		flags |= SDL_INIT_GAMEPAD;
+#endif
 #endif
 
 #ifdef _IRR_USE_SDL3_
@@ -492,8 +613,15 @@ CIrrDeviceSDL::~CIrrDeviceSDL()
 {
 #if defined(_IRR_COMPILE_WITH_JOYSTICK_EVENTS_)
 	const u32 numJoysticks = Joysticks.size();
-	for (u32 i = 0; i < numJoysticks; ++i)
-		SDL_CloseJoystick(Joysticks[i]);
+	for (u32 i = 0; i < numJoysticks; ++i) {
+#ifndef _IRR_USE_SDL3_
+		if (i < SDLGameControllers.size() && SDLGameControllers[i])
+			SDL_GameControllerClose(SDLGameControllers[i]);
+		else
+#endif
+		if (Joysticks[i])
+			SDL_CloseJoystick(Joysticks[i]);
+	}
 #endif
 	if (Window && Context) {
 		SDL_GL_MakeCurrent(Window, NULL);
@@ -1139,23 +1267,40 @@ bool CIrrDeviceSDL::run()
 		SDL_Joystick *joystick = Joysticks[i];
 		if (joystick) {
 			int j;
-			// query all buttons
-			const int numButtons = core::min_(SDL_GetNumJoystickButtons(joystick), 32);
-			joyevent.JoystickEvent.ButtonStates = 0;
-			for (j = 0; j < numButtons; ++j)
-				joyevent.JoystickEvent.ButtonStates |= (SDL_GetJoystickButton(joystick, j) << j);
+			bool used_gc_mapping = false;
+#ifndef _IRR_USE_SDL3_
+			SDL_GameController *gc = (i < SDLGameControllers.size())
+					? SDLGameControllers[i]
+					: nullptr;
+			if (gc && irr_sdl_shouldMapXboxViaGameController(gc, joystick)) {
+				irr_sdl_applyXboxGameController(gc, joystick, joyevent.JoystickEvent);
+				used_gc_mapping = true;
+			}
+#else
+			if (SDL_Gamepad *pad = SDL_GetGamepadFromJoystick(joystick);
+					pad && irr_sdl_shouldMapXboxViaGamepad(pad, joystick)) {
+				irr_sdl_applyXboxGamepad(pad, joystick, joyevent.JoystickEvent);
+				used_gc_mapping = true;
+			}
+#endif
+			if (!used_gc_mapping) {
+				const int numButtons = core::min_(SDL_GetNumJoystickButtons(joystick), 32);
+				joyevent.JoystickEvent.ButtonStates = 0;
+				for (j = 0; j < numButtons; ++j)
+					joyevent.JoystickEvent.ButtonStates |=
+						(SDL_GetJoystickButton(joystick, j) << j);
 
-			// query all axes, already in correct range
-			const int numAxes = core::min_(SDL_GetNumJoystickAxes(joystick),
-					(int)SEvent::SJoystickEvent::NUMBER_OF_AXES);
-			joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_X] = 0;
-			joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_Y] = 0;
-			joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_Z] = 0;
-			joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_R] = 0;
-			joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_U] = 0;
-			joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_V] = 0;
-			for (j = 0; j < numAxes; ++j)
-				joyevent.JoystickEvent.Axis[j] = SDL_GetJoystickAxis(joystick, j);
+				const int numAxes = core::min_(SDL_GetNumJoystickAxes(joystick),
+						(int)SEvent::SJoystickEvent::NUMBER_OF_AXES);
+				joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_X] = 0;
+				joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_Y] = 0;
+				joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_Z] = 0;
+				joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_R] = 0;
+				joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_U] = 0;
+				joyevent.JoystickEvent.Axis[SEvent::SJoystickEvent::AXIS_V] = 0;
+				for (j = 0; j < numAxes; ++j)
+					joyevent.JoystickEvent.Axis[j] = SDL_GetJoystickAxis(joystick, j);
+			}
 
 			// we can only query one hat, SDL only supports 8 directions
 			if (SDL_GetNumJoystickHats(joystick) > 0) {
@@ -1210,6 +1355,20 @@ bool CIrrDeviceSDL::activateJoysticks(core::array<SJoystickInfo> &joystickInfo)
 #if defined(_IRR_COMPILE_WITH_JOYSTICK_EVENTS_)
 	joystickInfo.clear();
 
+	for (u32 ji = 0; ji < Joysticks.size(); ++ji) {
+#ifndef _IRR_USE_SDL3_
+		if (ji < SDLGameControllers.size() && SDLGameControllers[ji])
+			SDL_GameControllerClose(SDLGameControllers[ji]);
+		else
+#endif
+		if (Joysticks[ji])
+			SDL_CloseJoystick(Joysticks[ji]);
+	}
+	Joysticks.clear();
+#ifndef _IRR_USE_SDL3_
+	SDLGameControllers.clear();
+#endif
+
 	int numJoysticks = 0;
 #ifdef _IRR_USE_SDL3_
 	(void)SDL_GetJoysticks(&numJoysticks);
@@ -1220,11 +1379,28 @@ bool CIrrDeviceSDL::activateJoysticks(core::array<SJoystickInfo> &joystickInfo)
 	numJoysticks = core::min_(numJoysticks, 256);
 
 	Joysticks.reallocate(numJoysticks);
+#ifndef _IRR_USE_SDL3_
+	SDLGameControllers.reallocate(numJoysticks);
+#endif
 	joystickInfo.reallocate(numJoysticks);
 
 	int joystick = 0;
 	for (; joystick < numJoysticks; ++joystick) {
+#ifndef _IRR_USE_SDL3_
+		SDL_GameController *gc = nullptr;
+		SDL_Joystick *j = nullptr;
+		if (SDL_IsGameController(joystick)) {
+			gc = SDL_GameControllerOpen(joystick);
+			if (gc)
+				j = SDL_GameControllerGetJoystick(gc);
+		}
+		if (!j)
+			j = SDL_OpenJoystick(joystick);
+		Joysticks.push_back(j);
+		SDLGameControllers.push_back(gc);
+#else
 		Joysticks.push_back(SDL_OpenJoystick(joystick));
+#endif
 		SJoystickInfo info;
 
 		info.Joystick = joystick;
@@ -1278,6 +1454,12 @@ bool CIrrDeviceSDL::rumbleJoystick(u32 joystickIndex, u16 lowFrequencyRumble,
 			durationMs) == 0;
 	// Many Xbox / DualSense stacks expose rumble only through the game
 	// controller interface; the second device is especially prone to this.
+	if (!ok && joystickIndex < SDLGameControllers.size() &&
+			SDLGameControllers[joystickIndex]) {
+		SDL_GameController *gc = SDLGameControllers[joystickIndex];
+		ok = SDL_GameControllerRumble(gc, lowFrequencyRumble,
+				highFrequencyRumble, durationMs) == 0;
+	}
 	if (!ok) {
 		const SDL_JoystickID jid = SDL_JoystickInstanceID(j);
 		SDL_GameController *gc = SDL_GameControllerFromInstanceID(jid);

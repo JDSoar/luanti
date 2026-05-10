@@ -332,6 +332,10 @@ private:
 	SDL_Window *Window;
 #if defined(_IRR_COMPILE_WITH_JOYSTICK_EVENTS_)
 	core::array<SDL_Joystick *> Joysticks;
+#ifndef _IRR_USE_SDL3_
+	//! Non-null when the device was opened with SDL_GameControllerOpen (do not SDL_JoystickClose).
+	core::array<SDL_GameController *> SDLGameControllers;
+#endif
 #endif
 
 	s32 MouseX, MouseY;
