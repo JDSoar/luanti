@@ -2538,6 +2538,13 @@ bool Game::isTouchShootlineUsed() const
 
 void Game::updateCameraOrientation(CameraOrientation *cam, float dtime)
 {
+	// Never grab / recenter the mouse for FPS look while a modal GUI is open.
+	// If this runs during inventory (mis-timed menu stack, pause transitions,
+	// etc.), updateCameraOrientation would warp the cursor to the screen centre
+	// every frame and the pointer appears frozen there.
+	if (isMenuActive())
+		return;
+
 	f32 sens_scale = getSensitivityScaleFactor();
 
 	if (g_touchcontrols) {

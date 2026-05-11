@@ -4120,29 +4120,6 @@ bool GUIFormSpecMenu::remapClickOutside(const SEvent &event)
 	return GUIModalMenu::remapClickOutside(event);
 }
 
-namespace {
-/**
- * Split-screen seat inventories use a viewport smaller than the window. Each
- * open formspec runs `stepGamepadInventoryCursor()` every frame; all of them
- * sharing one OS cursor means each seat warps it to its own `m_pointer`, so
- * the sticks cancel out and neither player can steer the cursor. Full-window
- * formspecs still sync the hardware cursor for gamepad users.
- */
-bool shouldWarpOsCursorForThisFormspecMenu(gui::IGUIEnvironment *env,
-		const core::rect<s32> &vp)
-{
-	if (!env || vp.getWidth() <= 0 || vp.getHeight() <= 0)
-		return true;
-	video::IVideoDriver *driver = env->getVideoDriver();
-	if (!driver)
-		return true;
-	const v2u32 screen = driver->getScreenSize();
-	if (vp.getWidth() < (s32)screen.X || vp.getHeight() < (s32)screen.Y)
-		return false;
-	return true;
-}
-} // namespace
-
 void GUIFormSpecMenu::ensureGamepadInventoryPointer()
 {
 	const core::rect<s32> clip = getAbsoluteClippingRect();
@@ -4198,10 +4175,8 @@ void GUIFormSpecMenu::stepGamepadInventoryCursor()
 		// position (otherwise the visible cursor lingers wherever the
 		// mouse was last left).
 		if (gui::ICursorControl *cc =
-				RenderingEngine::get_raw_device()->getCursorControl()) {
-			if (shouldWarpOsCursorForThisFormspecMenu(Environment, getViewport()))
-				cc->setPosition(m_pointer.X, m_pointer.Y);
-		}
+				RenderingEngine::get_raw_device()->getCursorControl())
+			cc->setPosition(m_pointer.X, m_pointer.Y);
 	}
 
 	static constexpr float CURSOR_SPEED = 1400.f;
@@ -4257,9 +4232,29 @@ void GUIFormSpecMenu::stepGamepadInventoryCursor()
 		// Drive the OS cursor along with the formspec pointer so the user
 		// can actually see what they're aiming at - otherwise only the
 		// invisible m_pointer moves and the visible cursor sits still.
-		if (gui::ICursorControl *cc =
-				RenderingEngine::get_raw_device()->getCursorControl()) {
-			if (shouldWarpOsCursorForThisFormspecMenu(Environment, getViewport()))
+		//
+		// Split-screen: two inventories both run this every frame; tiny analog
+		// drift on both pads used to fight over SDL_WarpMouse continuously.
+		// Only warp when deflection is clearly intentional (D-pad always clears).
+		const core::rect<s32> &warp_vp = getViewport();
+		video::IVideoDriver *drv = Environment->getVideoDriver();
+		u32 scr_w = 0, scr_h = 0;
+		if (drv) {
+			const auto ss = drv->getScreenSize();
+			scr_w = ss.Width;
+			scr_h = ss.Height;
+		}
+		const bool partial_viewport = warp_vp.getWidth() > 0 &&
+				warp_vp.getHeight() > 0 && drv &&
+				(warp_vp.getWidth() < (s32)scr_w ||
+						warp_vp.getHeight() < (s32)scr_h);
+		static constexpr float OS_CURSOR_WARP_MIN_MAG2 = 0.0025f; // ~0.05 axis
+		const float mag2 = ax * ax + ay * ay;
+		const bool warp_os = !partial_viewport || mag2 >= OS_CURSOR_WARP_MIN_MAG2;
+
+		if (warp_os) {
+			if (gui::ICursorControl *cc =
+					RenderingEngine::get_raw_device()->getCursorControl())
 				cc->setPosition(m_pointer.X, m_pointer.Y);
 		}
 
