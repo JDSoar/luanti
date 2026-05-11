@@ -91,8 +91,9 @@ GUIFormSpecMenu::GUIFormSpecMenu(JoystickController *joystick,
 		gui::IGUIElement *parent, s32 id, IMenuManager *menumgr,
 		Client *client, gui::IGUIEnvironment *guienv, ISimpleTextureSource *tsrc,
 		ISoundManager *sound_manager, IFormSource *fsrc, TextDest *tdst,
-		const std::string &formspecPrepend, bool remap_dbl_click):
-	GUIModalMenu(guienv, parent, id, menumgr, remap_dbl_click),
+		const std::string &formspecPrepend, bool remap_dbl_click,
+		const core::rect<s32> &initial_viewport):
+	GUIModalMenu(guienv, parent, id, menumgr, remap_dbl_click, initial_viewport),
 	m_invmgr(client),
 	m_tsrc(tsrc),
 	m_sound_manager(sound_manager),
@@ -120,7 +121,8 @@ GUIFormSpecMenu::~GUIFormSpecMenu()
 
 void GUIFormSpecMenu::create(GUIFormSpecMenu *&cur_formspec, Client *client,
 	gui::IGUIEnvironment *guienv, JoystickController *joystick, IFormSource *fs_src,
-	TextDest *txt_dest, const std::string &formspecPrepend, ISoundManager *sound_manager)
+	TextDest *txt_dest, const std::string &formspecPrepend, ISoundManager *sound_manager,
+	const core::rect<s32> &initial_viewport)
 {
 	if (cur_formspec && cur_formspec->getReferenceCount() == 1) {
 		/*
@@ -138,7 +140,7 @@ void GUIFormSpecMenu::create(GUIFormSpecMenu *&cur_formspec, Client *client,
 	if (cur_formspec == nullptr) {
 		cur_formspec = new GUIFormSpecMenu(joystick, guiroot, -1, &g_menumgr,
 			client, guienv, client->getTextureSource(), sound_manager, fs_src,
-			txt_dest, formspecPrepend);
+			txt_dest, formspecPrepend, true, initial_viewport);
 
 		/*
 			Caution: do not call (*cur_formspec)->drop() here --
@@ -152,6 +154,9 @@ void GUIFormSpecMenu::create(GUIFormSpecMenu *&cur_formspec, Client *client,
 		cur_formspec->setFormSource(fs_src);
 		cur_formspec->setTextDest(txt_dest);
 	}
+
+	if (initial_viewport.getWidth() > 0 && initial_viewport.getHeight() > 0)
+		cur_formspec->setViewport(initial_viewport);
 
 	cur_formspec->doPause = false;
 }
@@ -4115,6 +4120,29 @@ bool GUIFormSpecMenu::remapClickOutside(const SEvent &event)
 	return GUIModalMenu::remapClickOutside(event);
 }
 
+namespace {
+/**
+ * Split-screen seat inventories use a viewport smaller than the window. Each
+ * open formspec runs `stepGamepadInventoryCursor()` every frame; all of them
+ * sharing one OS cursor means each seat warps it to its own `m_pointer`, so
+ * the sticks cancel out and neither player can steer the cursor. Full-window
+ * formspecs still sync the hardware cursor for gamepad users.
+ */
+bool shouldWarpOsCursorForThisFormspecMenu(gui::IGUIEnvironment *env,
+		const core::rect<s32> &vp)
+{
+	if (!env || vp.getWidth() <= 0 || vp.getHeight() <= 0)
+		return true;
+	video::IVideoDriver *driver = env->getVideoDriver();
+	if (!driver)
+		return true;
+	const v2u32 screen = driver->getScreenSize();
+	if (vp.getWidth() < (s32)screen.X || vp.getHeight() < (s32)screen.Y)
+		return false;
+	return true;
+}
+} // namespace
+
 void GUIFormSpecMenu::ensureGamepadInventoryPointer()
 {
 	const core::rect<s32> clip = getAbsoluteClippingRect();
@@ -4170,8 +4198,10 @@ void GUIFormSpecMenu::stepGamepadInventoryCursor()
 		// position (otherwise the visible cursor lingers wherever the
 		// mouse was last left).
 		if (gui::ICursorControl *cc =
-				RenderingEngine::get_raw_device()->getCursorControl())
-			cc->setPosition(m_pointer.X, m_pointer.Y);
+				RenderingEngine::get_raw_device()->getCursorControl()) {
+			if (shouldWarpOsCursorForThisFormspecMenu(Environment, getViewport()))
+				cc->setPosition(m_pointer.X, m_pointer.Y);
+		}
 	}
 
 	static constexpr float CURSOR_SPEED = 1400.f;
@@ -4228,8 +4258,10 @@ void GUIFormSpecMenu::stepGamepadInventoryCursor()
 		// can actually see what they're aiming at - otherwise only the
 		// invisible m_pointer moves and the visible cursor sits still.
 		if (gui::ICursorControl *cc =
-				RenderingEngine::get_raw_device()->getCursorControl())
-			cc->setPosition(m_pointer.X, m_pointer.Y);
+				RenderingEngine::get_raw_device()->getCursorControl()) {
+			if (shouldWarpOsCursorForThisFormspecMenu(Environment, getViewport()))
+				cc->setPosition(m_pointer.X, m_pointer.Y);
+		}
 
 		SEvent move{};
 		move.EventType = EET_MOUSE_INPUT_EVENT;

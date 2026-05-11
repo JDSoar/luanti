@@ -160,14 +160,16 @@ public:
 			IFormSource* fs_src,
 			TextDest* txt_dst,
 			const std::string &formspecPrepend,
-			bool remap_dbl_click = true);
+			bool remap_dbl_click = true,
+			const core::rect<s32> &initial_viewport = core::rect<s32>(0, 0, 0, 0));
 
 	~GUIFormSpecMenu();
 
 	static void create(GUIFormSpecMenu *&cur_formspec, Client *client,
 		gui::IGUIEnvironment *guienv, JoystickController *joystick, IFormSource *fs_src,
 		TextDest *txt_dest, const std::string &formspecPrepend,
-		ISoundManager *sound_manager);
+		ISoundManager *sound_manager,
+		const core::rect<s32> &initial_viewport = core::rect<s32>(0, 0, 0, 0));
 
 	void setFormSpec(const std::string &formspec_string,
 			const InventoryLocation &current_inventory_location)

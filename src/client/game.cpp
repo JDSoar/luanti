@@ -2471,6 +2471,14 @@ void Game::updateCameraDirection(CameraOrientation *cam, float dtime)
 {
 	auto *cur_control = device->getCursorControl();
 
+	// Any modal GUI (inventory, pause menu, …) needs absolute cursor coords and
+	// must not run free-look. Split-screen uses primaryLocalInputBlockedByMenus()
+	// so seat 0 can keep driving while seat 1 has a viewport-clipped inventory;
+	// that must NOT leave relative mouse mode on — SDL then integrates deltas
+	// instead of reporting window positions and camera mouse-look still runs,
+	// which breaks dragging items with the shared mouse on Linux (Ubuntu).
+	const bool any_modal_gui = isMenuActive();
+
 	/* On Linux and Windows, enabling relative mouse mode somehow results
 	in simulated mouse events being generated from touch events, even though
 	SDL_HINT_MOUSE_TOUCH_EVENTS and SDL_HINT_TOUCH_MOUSE_EVENTS are set to 0.
@@ -2478,10 +2486,11 @@ void Game::updateCameraDirection(CameraOrientation *cam, float dtime)
 	this results in duplicated input. To avoid that, we don't enable relative
 	mouse mode if we're in touchscreen mode. */
 	if (cur_control)
-		cur_control->setRelativeMode(!g_touchcontrols && !primaryLocalInputBlockedByMenus());
+		cur_control->setRelativeMode(!g_touchcontrols && !any_modal_gui);
 
 	if ((device->isWindowActive() && device->isWindowFocused()
-			&& !primaryLocalInputBlockedByMenus()) || input->isRandom()) {
+			&& !primaryLocalInputBlockedByMenus() && !any_modal_gui) ||
+			input->isRandom()) {
 
 		if (cur_control && !input->isRandom()) {
 			// Mac OSX gets upset if this is set every frame

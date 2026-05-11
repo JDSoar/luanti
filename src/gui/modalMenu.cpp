@@ -32,7 +32,8 @@ bool PointerAction::isRelated(PointerAction previous) {
 }
 
 GUIModalMenu::GUIModalMenu(gui::IGUIEnvironment* env, gui::IGUIElement* parent,
-	s32 id, IMenuManager *menumgr, bool remap_click_outside) :
+	s32 id, IMenuManager *menumgr, bool remap_click_outside,
+	const core::rect<s32> &initial_viewport) :
 		IGUIElement(gui::EGUIET_ELEMENT, env, parent, id,
 				core::rect<s32>(0, 0, 100, 100)),
 #ifdef __ANDROID__
@@ -43,6 +44,15 @@ GUIModalMenu::GUIModalMenu(gui::IGUIEnvironment* env, gui::IGUIElement* parent,
 {
 	m_gui_scale = g_settings->getFloat("gui_scaling", 0.5f, 20.0f) *
 			RenderingEngine::getDisplayDensity();
+
+	// Split-screen formspecs must know their viewport before MainMenuManager
+	// sees them; otherwise createdMenu() treats every new menu as fullscreen
+	// and hides every already-open viewport menu (breaking multi-seat UIs).
+	if (initial_viewport.getWidth() > 0 && initial_viewport.getHeight() > 0) {
+		m_viewport = initial_viewport;
+		m_screensize_old = v2u32(0, 0);
+		m_viewport_origin_old = v2s32(0, 0);
+	}
 
 	setVisible(true);
 	m_menumgr->createdMenu(this);

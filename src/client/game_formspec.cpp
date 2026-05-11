@@ -301,12 +301,7 @@ void GameFormSpec::showFormSpecForSeat(u8 seat_idx, Client *seat_client,
 	GUIFormSpecMenu::create(m_seat_formspec[seat_idx], c,
 		m_rendering_engine->get_gui_env(),
 		jc, fs_src, txt_dst, c->getFormspecPrepend(),
-		c->getSoundManager());
-	// Same viewport story as showPlayerInventory: constrain the formspec
-	// to this seat's panel so it doesn't paint over its split-screen
-	// neighbours.
-	if (seat_viewport.getWidth() > 0 && seat_viewport.getHeight() > 0)
-		m_seat_formspec[seat_idx]->setViewport(seat_viewport);
+		c->getSoundManager(), seat_viewport);
 	m_seat_formspec[seat_idx]->setName(formname);
 }
 
@@ -347,9 +342,7 @@ void GameFormSpec::showCSMFormSpecForSeat(u8 seat_idx, Client *seat_client,
 	GUIFormSpecMenu::create(m_seat_formspec[seat_idx], c,
 			m_rendering_engine->get_gui_env(),
 			jc, fs_src, txt_dst, c->getFormspecPrepend(),
-			c->getSoundManager());
-	if (seat_viewport.getWidth() > 0 && seat_viewport.getHeight() > 0)
-		m_seat_formspec[seat_idx]->setViewport(seat_viewport);
+			c->getSoundManager(), seat_viewport);
 	m_seat_formspec[seat_idx]->setName(formname);
 }
 
@@ -451,13 +444,7 @@ void GameFormSpec::showPlayerInventory(const std::string *fs_override,
 	GUIFormSpecMenu::create(m_seat_formspec[seat_idx], c,
 		m_rendering_engine->get_gui_env(),
 		jc, fs_src.get(), txt_dst, c->getFormspecPrepend(),
-		c->getSoundManager());
-
-	// Constrain the formspec to the requesting seat's panel when called
-	// from a split-screen seat. Without this the menu would lay itself
-	// out for the full window and paint on top of every player's view.
-	if (seat_viewport.getWidth() > 0 && seat_viewport.getHeight() > 0)
-		m_seat_formspec[seat_idx]->setViewport(seat_viewport);
+		c->getSoundManager(), seat_viewport);
 
 	m_seat_formspec[seat_idx]->setFormSpec(fs_src->getForm(), inventoryloc);
 	fs_src.release(); // owned by GUIFormSpecMenu
@@ -605,9 +592,7 @@ void GameFormSpec::showDeathFormspecLegacy(u8 seat_idx, Client *seat_client,
 	GUIFormSpecMenu::create(m_seat_formspec[seat_idx], c,
 		m_rendering_engine->get_gui_env(),
 		jc, fs_src, txt_dst, c->getFormspecPrepend(),
-		c->getSoundManager());
-	if (seat_viewport.getWidth() > 0 && seat_viewport.getHeight() > 0)
-		m_seat_formspec[seat_idx]->setViewport(seat_viewport);
+		c->getSoundManager(), seat_viewport);
 	m_seat_formspec[seat_idx]->setFocus("btn_respawn");
 }
 

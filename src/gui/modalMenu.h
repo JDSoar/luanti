@@ -37,7 +37,8 @@ class GUIModalMenu : public gui::IGUIElement
 {
 public:
 	GUIModalMenu(gui::IGUIEnvironment* env, gui::IGUIElement* parent, s32 id,
-		IMenuManager *menumgr, bool remap_dbl_click = true);
+		IMenuManager *menumgr, bool remap_dbl_click = true,
+		const core::rect<s32> &initial_viewport = core::rect<s32>(0, 0, 0, 0));
 	virtual ~GUIModalMenu();
 
 	void allowFocusRemoval(bool allow);
